@@ -93,7 +93,18 @@ def _build_neuron_model(case: ChannelNoConcCase, *, mapping_spec: MappingSpec):
 
     mechanism_dir = str(Path(case.mod_dir).resolve())
     if mechanism_dir not in _LOADED_MECHANISM_DIRS:
-        load_mechanisms(mechanism_dir)
+        # load_mechanisms returns False (no raise) if x86_64/libnrnmech.so is missing.
+        # Must not cache the path on failure, or a later nrnivmodl compile is never picked up
+        # in the same Python process (e.g. Jupyter kernel).
+        loaded = load_mechanisms(mechanism_dir)
+        if not loaded:
+            raise RuntimeError(
+                "NEURON could not load compiled mechanisms from "
+                f"{mechanism_dir!s}. Run `nrnivmodl .` in that directory (expect "
+                "x86_64/libnrnmech.so or your platform equivalent), then retry; "
+                "if you compiled after an earlier failed run, restart the kernel or "
+                "this import would have skipped reloading."
+            )
         _LOADED_MECHANISM_DIRS.add(mechanism_dir)
     h.load_file("stdrun.hoc")
 
