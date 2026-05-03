@@ -220,6 +220,7 @@ def run_notebook_config_workflow(
     plot: bool | None = None,
     expand_only: bool = False,
     raise_on_failure: bool = False,
+    progress: bool = False,
 ) -> dict[str, Any]:
     inputs = load_config_workflow_inputs(config_path)
     resolved_out_dir = (
@@ -232,6 +233,7 @@ def run_notebook_config_workflow(
         out_dir=resolved_out_dir,
         expand_only=bool(expand_only),
         plot=plot,
+        progress=bool(progress),
     )
     run_info = {
         "status": int(result["status"]),

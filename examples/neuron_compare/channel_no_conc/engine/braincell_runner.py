@@ -29,6 +29,7 @@ except ImportError:  # pragma: no cover
 
 def run_case(case: ChannelNoConcCase) -> dict[str, Any]:
     import braincell
+    import braincell.channel  # noqa: F401 - imports register channel classes by side effect.
     from braincell.filter import AllRegion, at
     from braincell.mech import CableProperty, Channel, CurrentProbe, MechanismProbe, StateProbe, get_registry
     from braincell.morph.branch import Branch

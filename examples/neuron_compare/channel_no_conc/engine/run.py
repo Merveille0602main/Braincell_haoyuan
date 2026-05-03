@@ -109,7 +109,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(plot=None)
     parser.add_argument("--plot", dest="plot", action="store_true", help="Generate per-case comparison plots for sweeps.")
     parser.add_argument("--no-plot", dest="plot", action="store_false", help="Disable plot generation for sweeps.")
+    parser.add_argument("--progress", action="store_true", help="Show template/case progress while running.")
     return parser
+
+
+def _progress_iter(items, *, enabled: bool, desc: str):
+    if not enabled:
+        yield from items
+        return
+
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        total = len(items) if hasattr(items, "__len__") else None
+        for index, item in enumerate(items, start=1):
+            suffix = f"{index}/{total}" if total is not None else str(index)
+            print(f"{desc}: {suffix}", flush=True)
+            yield item
+        return
+
+    yield from tqdm(items, desc=desc, unit="item")
 
 
 def run_sweep_config(
@@ -118,6 +137,7 @@ def run_sweep_config(
     out_dir: str | Path | None = None,
     expand_only: bool = False,
     plot: bool | None = None,
+    progress: bool = False,
 ) -> int:
     expanded_cases = expand_cases(config)
     root = Path(__file__).resolve().parents[1]
@@ -156,7 +176,11 @@ def run_sweep_config(
     success_results: list[dict[str, object]] = []
     failed_cases: list[dict[str, object]] = []
 
-    for case_payload in expanded_cases:
+    for case_payload in _progress_iter(
+        expanded_cases,
+        enabled=bool(progress),
+        desc=f"{config.config_name}/{config.template_name} cases",
+    ):
         group_id = str(case_payload.get("group_id", ""))
         case_id = str(case_payload["case_id"])
         try:
@@ -244,6 +268,7 @@ def run_config_file(
     out_dir: str | Path | None = None,
     expand_only: bool = False,
     plot: bool | None = None,
+    progress: bool = False,
 ) -> dict[str, Any]:
     model_config = load_model_config(config_path)
     root = Path(__file__).resolve().parents[1]
@@ -262,7 +287,12 @@ def run_config_file(
     failures: list[dict[str, Any]] = []
     all_metric_rows: list[dict[str, Any]] = []
 
-    for template_path in model_config.template_paths:
+    template_paths = _progress_iter(
+        model_config.template_paths,
+        enabled=bool(progress),
+        desc=f"{model_config.config_name} templates",
+    )
+    for template_path in template_paths:
         resolved_template_path = Path(template_path).expanduser().resolve()
         template_out_dir = default_template_run_output_dir(
             config_out_dir=resolved_out_dir,
@@ -278,6 +308,7 @@ def run_config_file(
                 out_dir=template_out_dir,
                 expand_only=bool(expand_only),
                 plot=plot,
+                progress=bool(progress),
             )
             run_row, observable_rows, failure_row = _build_config_template_success_rows(
                 model_config=model_config,
@@ -567,6 +598,7 @@ def main() -> int:
             out_dir=args.out_dir,
             expand_only=bool(args.expand_only),
             plot=args.plot,
+            progress=bool(args.progress),
         )
         return int(result["status"])
 
@@ -576,6 +608,7 @@ def main() -> int:
         out_dir=args.out_dir,
         expand_only=bool(args.expand_only),
         plot=args.plot,
+        progress=bool(args.progress),
     )
 
 
