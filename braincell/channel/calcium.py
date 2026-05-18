@@ -44,6 +44,7 @@ __all__ = [
     "Ca_ZH2019_IO",
     "CaHVA_SU2015_DCN",
     "CaL_SU2015_DCN",
+    "CaLVA_SU2015_DCN",
 ]
 
 
@@ -870,5 +871,78 @@ class CaL_SU2015_DCN(HH):
             V < -81.0,
             0.333 * u.math.exp((V + 466.0) / 66.0),
             0.333 * u.math.exp((V + 21.0) / -10.5) + 9.32,
+        ) / self.qdeltat
+
+
+@register_channel("CaLVA_SU2015_DCN")  ## 2026.5.18 from jhy
+class CaLVA_SU2015_DCN(HH):
+    """Template-based import of ``CaLVA_SU15_DCN.mod`` (DCN low-voltage-activated Ca channel).
+
+    Uses a GHK permeability current (same gate equations as CaL_SU2015_DCN but
+    with GHK formula instead of Ohmic).
+    Current: ``ical = perm * m^2 * h * GHK(V, cali, calo)``
+
+    ``ci_mM`` / ``co_mM`` fix the intra-/extra-cellular concentrations used in the GHK
+    formula instead of reading them from the Ca ion system.  The defaults match
+    NEURON's ``cal`` ion pool defaults (both = 1.0 mM), which keeps the
+    channel_no_conc comparison numerically stable.  Override with actual
+    Ca dynamics values when used in a full model with concentration tracking.
+    """
+
+    __module__ = "braincell.channel"
+    root_type = Calcium
+    gates = (
+        Gate("m", power=2),
+        Gate("h"),
+    )
+
+    def __init__(
+        self,
+        size: brainstate.typing.Size,
+        g_max: Union[brainstate.typing.ArrayLike, Callable] = 1e-6 * (u.metre / u.second),
+        temp: brainstate.typing.ArrayLike = u.celsius2kelvin(37.0),
+        qdeltat: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
+        ci_mM: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
+        co_mM: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
+        name: Optional[str] = None,
+    ):
+        super().__init__(size=size, name=name)
+        self.g_max = braintools.init.param(g_max, self.varshape, allow_none=False)
+        self.temp = braintools.init.param(temp, self.varshape, allow_none=False)
+        self.qdeltat = braintools.init.param(qdeltat, self.varshape, allow_none=False)
+        self.ci_mM = braintools.init.param(ci_mM, self.varshape, allow_none=False)
+        self.co_mM = braintools.init.param(co_mM, self.varshape, allow_none=False)
+        self.z = 2
+
+    def current(self, V, Ca: IonInfo, *unused):
+        ci = self.ci_mM * u.mM
+        co = self.co_mM * u.mM
+        drive = ghk_flux(V=V, ci=ci, co=co, z=self.z, T=self.temp)
+        return -self.g_max * self.conductance_factor(V, Ca) * drive
+
+    def f_m_inf(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        v = V.to_decimal(u.mV)
+        return 1.0 / (1.0 + u.math.exp((v + 56.0) / -6.2))
+
+    def f_m_tau(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        v = V.to_decimal(u.mV)
+        return (
+            0.333 / (u.math.exp((v + 131.0) / -16.7) + u.math.exp((v + 15.8) / 18.2)) + 0.204
+        ) / self.qdeltat
+
+    def f_h_inf(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        v = V.to_decimal(u.mV)
+        return 1.0 / (1.0 + u.math.exp((v + 80.0) / 4.0))
+
+    def f_h_tau(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        v = V.to_decimal(u.mV)
+        return u.math.where(
+            v < -81.0,
+            0.333 * u.math.exp((v + 466.0) / 66.0),
+            0.333 * u.math.exp((v + 21.0) / -10.5) + 9.32,
         ) / self.qdeltat
 

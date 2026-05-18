@@ -1,0 +1,145 @@
+# Changelog by Haoyuan Jiang — 2026-05-18
+
+---
+
+## 【第一批，commit 0174fef，2026-05-18 上午】
+
+### 一、新增通道实现
+
+#### 1. Kv1p5_MA2020_GrC（延迟整流钾通道）
+- **文件**：`braincell/channel/potassium.py`
+- **来源**：翻译自 `examples/neuron_compare/Cerebellum_mod/GrC/channel/Kv1p5_MA20_GrC.mod`
+- **说明**：三门控（m、n、u）HH 型钾通道，含 Q10 温度校正因子和额外电压依赖因子。
+
+#### 2. CaHVA_SU2015_DCN（高阈值激活钙通道）
+- **文件**：`braincell/channel/calcium.py`
+- **来源**：翻译自 `examples/neuron_compare/Cerebellum_mod/DCN/channel/CaHVA_SU15_DCN.mod`
+- **说明**：高阈值激活钙通道，使用 GHK 渗透率公式，m³ 门控。
+
+#### 3. CaL_SU2015_DCN（L 型钙通道，Ohmic）
+- **文件**：`braincell/channel/calcium.py`
+- **来源**：翻译自 `examples/neuron_compare/Cerebellum_mod/DCN/channel/CaL_SU15_DCN.mod`
+- **说明**：m²h 门控，Ohmic 公式，使用固定翻转电位（139 mV）。
+
+### 二、新增 JSON 配置
+- `configs/ma20_grc/kv1p5_ma20_grc.json`
+- `configs/su15_dcn/cahva_su15_dcn.json`
+- `configs/su15_dcn/cal_su15_dcn.json`
+
+### 三、引擎层修改
+#### braincell_runner.py — 新增 `_m_s` 参数后缀规则
+为 `_convert_braincell_value()` 添加对 `_m_s` 后缀的处理：
+将 JSON 中的浮点数乘以 `u.metre / u.second`，使渗透率参数携带正确的 SI 单位传入 braincell 通道构造函数。
+
+---
+
+## 【第二批，commit 2b695f0，2026-05-18 下午】
+
+### 一、新增通道实现
+
+#### 1. SK_SU2015_DCN（钙依赖性钾通道）
+- **文件**：`braincell/channel/potassium_calcium.py`
+- **来源**：翻译自 `examples/neuron_compare/Cerebellum_mod/DCN/channel/SK_SU15_DCN.mod`
+- **说明**：小电导钙依赖性钾通道（SK 型），电流经由门控变量 z 控制，z 的稳态和时间常数由胞内 Ca²⁺ 浓度通过 Hill 方程决定。
+
+#### 2. CaLVA_SU2015_DCN（低阈值激活钙通道）
+- **文件**：`braincell/channel/calcium.py`
+- **来源**：翻译自 `examples/neuron_compare/Cerebellum_mod/DCN/channel/CaLVA_SU15_DCN.mod`
+- **说明**：低阈值激活钙通道，使用 GHK 渗透率公式计算电流（`ical = perm * m² * h * GHK(v, cali, calo)`）。
+  - 构造参数 `ci_mM / co_mM`（默认均为 1.0 mM）：固定 GHK 公式中使用的胞内/胞外 Ca²⁺ 浓度，
+    不从 Ca 离子系统动态读取。默认值与 NEURON 的 `cal` 自定义离子的实际初始化默认值保持一致，
+    确保 channel_no_conc 比较框架下的数值稳定性。
+    在带浓度追踪的完整模型中使用时，应根据实际情况覆盖此参数。
+
+### 二、新增 JSON 配置
+
+- `configs/su15_dcn/sk_su15_dcn.json`
+- `configs/su15_dcn/calva_su15_dcn.json`
+
+### 三、引擎层修改（重要，请维护者注意）
+
+#### 3.1 neuron_runner.py — 修复 `_m_s` 参数的单位换算 bug
+
+**问题根因**：
+比较框架的参数命名约定规定，以 `_m_s` 结尾的参数（如 `p_m_s`）表示该值的物理单位为 **m/s（米/秒）**。
+`braincell_runner.py` 中已正确处理了这一约定（乘以 `u.metre / u.second`），
+但 `neuron_runner.py` 之前直接将原始浮点数传给 NEURON（`setattr(target, attr_name, float(value))`），
+没有做任何单位转换。
+
+然而 NEURON 的 MOD 文件（包括 `CaHVA_SU15_DCN.mod`、`CaLVA_SU15_DCN.mod`）
+均将渗透率 `perm` 定义为 **cm/s（厘米/秒）** 单位：
+```
+perm = 1 (cm/seconds)   ← NEURON MOD 文件原文
+```
+
+这导致：以 `p_m_s = 7.5e-8` 为例：
+- braincell 侧得到：`7.5e-8 m/s`（正确）
+- NEURON 侧得到：`perm = 7.5e-8 cm/s`（比 braincell 小 100 倍，错误！）
+
+**影响**：所有使用 GHK 渗透率的通道（CaHVA、CaLVA）NEURON 侧电流比 braincell 侧小 100 倍：
+- CaHVA：电流 rel_MAE 高达 **~10,000%**（只因电流绝对值极小，仿真未崩溃，故之前未被发现）
+- CaLVA：电流比差 100 倍，braincell 侧产生数值爆炸，电压出现 NaN
+
+**修复方法**：
+新增 `_convert_neuron_value()` 函数，对 `_m_s` 后缀参数在传入 NEURON 前乘以 100（m/s → cm/s）：
+```python
+def _convert_neuron_value(value: float, *, ir_key: str) -> float:
+    if ir_key.endswith("_m_s"):
+        return float(value) * 100.0  # m/s → cm/s，匹配 NEURON MOD 文件单位
+    return float(value)
+```
+
+**影响范围**：
+- 仅影响 `_m_s` 后缀参数。当前使用该后缀的 config 仅有 `cahva_su15_dcn.json` 和 `calva_su15_dcn.json`。
+- 所有其他通道（使用 `_S_cm2`、`_mV` 等后缀）不受影响，已通过重跑 Kv1p5 验证。
+- **修复后效果**：CaHVA 电流 rel_MAE 从 ~10,000% 降至 <1.2%；CaLVA 不再出现 NaN。
+
+**对未来维护者的提示**：
+若新增的 MOD 文件中渗透率使用非 cm/s 单位，需在此函数中对应扩展，或考虑在 JSON 中
+分别指定 neuron/braincell 两侧的值（mapping 已支持 `"neuron": ..., "braincell": ...` 分侧写法）。
+
+---
+
+#### 3.2 experiment_schema.py — 新增 `neuron_init_attrs` 字段
+
+**动机**：
+CaLVA_SU15_DCN.mod 使用自定义离子 `cal`（非标准 `ca`）。
+对于此类离子，NEURON 的默认初始浓度无法通过标准的 `ion_state` 字段控制，
+需要在仿真初始化后直接对段（segment）级别的离子对象赋值。
+
+**修改内容**：
+在 `ChannelNoConcCase` dataclass 中新增字段：
+```python
+neuron_init_attrs: dict[str, float]  # 默认为空字典 {}
+```
+
+JSON 配置中可选写入：
+```json
+"neuron_init_attrs": {
+    "cal.cali": 5e-5,    // 点分格式：自定义离子浓度，在 finitialize 后逐段赋值
+    "some_global": 1.0   // 无点格式：在 h 对象上全局设置
+}
+```
+
+在 `neuron_runner.py` 中的处理：
+- 无点格式（如 `"celsius"`）：`finitialize` 前通过 `setattr(h, attr, value)` 全局设置
+- 点分格式（如 `"cal.cali"`）：`finitialize` 后逐段找到对应离子对象（`seg.cal_ion`），直接赋值
+
+**向后兼容性**：
+`neuron_init_attrs` 默认值为空字典，所有已有 JSON 配置无需修改，行为与改动前完全相同。
+`case_to_payload()` 序列化时，空字典不写入输出，也不影响已有的 case 快照文件。
+
+---
+
+---
+
+## 全部通道验证结果汇总
+
+| 通道 | 批次 | 比较结果 |
+|---|---|---|
+| Kv1p5_MA2020_GrC | 第一批 | voltage rel_MAE < 0.008%，gates < 0.04%，通过 |
+| CaHVA_SU2015_DCN | 第一批（后被修复） | 修复前 current rel_MAE ~10,000%；修复后 < 1.2% |
+| CaL_SU2015_DCN | 第一批 | voltage rel_MAE < 0.4%，current rel_MAE < 5%，通过 |
+| SK_SU2015_DCN | 第二批 | voltage rel_MAE < 0.003%，通过 |
+| CaLVA_SU2015_DCN | 第二批 | voltage rel_MAE < 0.40%，current rel_MAE < 2.8%，通过 |
+| 其他已有通道 | — | 不受任何影响，重跑结果与改动前一致 |

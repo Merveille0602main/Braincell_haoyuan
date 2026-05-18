@@ -33,6 +33,7 @@ __all__ = [
     "Kca3p1_MA2020",
     "Kca2p2_MA2020",
     "Kca1p1_MA2020",
+    "SK_SU2015_DCN",
 ]
 
 
@@ -416,3 +417,45 @@ class Kca1p1_MA2020(Markov):
     def b4(self, V, K: IonInfo, Ca: IonInfo):
         _ = (K, Ca)
         return self.pb4 * self._beta_factor(V) * self._phi()
+
+
+@register_channel("SK_SU2015_DCN")
+class SK_SU2015_DCN(HH):
+    """Template-based import of ``SK_SU15_DCN.mod`` (DCN small-conductance Ca-activated K channel).
+
+    Conductance is activated by intracellular Ca²⁺ via a 4th-power Hill equation.
+    Current: ``ik = gbar * z * (v - ek)``
+    Steady state: ``zinf = [Ca]i⁴ / ([Ca]i⁴ + (3e-4 mM)⁴)``
+    Time constant: ``tauz = (1 - 186.67*[Ca]i) / qdeltat`` if [Ca]i < 0.005 mM, else 0.0667 / qdeltat
+    """
+
+    __module__ = "braincell.channel"
+    root_type = _KCA_ROOT_TYPE
+    current_owner_type = Potassium
+    gates = (Gate("z"),)
+
+    def __init__(
+        self,
+        size: brainstate.typing.Size,
+        g_max: Union[brainstate.typing.ArrayLike, Callable] = 0.01 * (u.mS / u.cm ** 2),
+        qdeltat: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
+        name: Optional[str] = None,
+    ):
+        super().__init__(size=size, name=name)
+        self.g_max = braintools.init.param(g_max, self.varshape, allow_none=False)
+        self.qdeltat = braintools.init.param(qdeltat, self.varshape, allow_none=False)
+
+    def current(self, V, K: IonInfo, Ca: IonInfo):
+        return self.g_max * self.conductance_factor(V, K, Ca) * (K.E - V)
+
+    def f_z_inf(self, V, K: IonInfo, Ca: IonInfo):
+        _ = (V, K)
+        ci = Ca.Ci / u.mM
+        kd4 = (3e-4) ** 4
+        return ci ** 4 / (ci ** 4 + kd4)
+
+    def f_z_tau(self, V, K: IonInfo, Ca: IonInfo):
+        _ = (V, K)
+        ci = Ca.Ci / u.mM
+        tauz = u.math.where(ci < 0.005, 1.0 - 186.67 * ci, 0.0667)
+        return tauz / self.qdeltat

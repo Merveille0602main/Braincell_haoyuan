@@ -216,6 +216,7 @@ class ChannelNoConcCase:
     ion_state: IonStateSpec | None
     channel_params: dict[str, Any]
     leak: LeakSpec
+    neuron_init_attrs: dict[str, float]
 
     @property
     def channel_state(self) -> IonStateSpec | None:
@@ -286,6 +287,12 @@ class ChannelNoConcCase:
             e_mV=float(leak_data.get("e_mV", -65.0)),
         )
 
+        neuron_init_attrs_raw = payload.get("neuron_init_attrs", {})
+        neuron_init_attrs = {
+            str(k): float(v)
+            for k, v in require_mapping(neuron_init_attrs_raw, name="neuron_init_attrs").items()
+        }
+
         return cls(
             case_id=case_id,
             config_name=config_name,
@@ -300,6 +307,7 @@ class ChannelNoConcCase:
             ion_state=ion_state,
             channel_params=channel_params,
             leak=leak,
+            neuron_init_attrs=neuron_init_attrs,
         )
 
 
@@ -460,6 +468,7 @@ def case_to_payload(case: ChannelNoConcCase) -> dict[str, Any]:
             else {}
         ),
         "channel_params": dict(case.channel_params),
+        **({"neuron_init_attrs": dict(case.neuron_init_attrs)} if case.neuron_init_attrs else {}),
         "leak": {
             "enabled": case.leak.enabled,
             "g_S_cm2": case.leak.g_S_cm2,

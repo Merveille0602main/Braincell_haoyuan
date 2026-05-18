@@ -37,6 +37,13 @@ def run_case(case: ChannelNoConcCase) -> dict[str, Any]:
     h.celsius = float(case.simulation.temperature_celsius)
     h.v_init = float(case.simulation.v_init_mV)
     h.finitialize(h.v_init)
+    for attr, value in case.neuron_init_attrs.items():
+        if "." in attr:
+            ion_type, field = attr.split(".", 1)
+            for seg in section:
+                ion_obj = getattr(seg, f"{ion_type}_ion", None)
+                if ion_obj is not None:
+                    setattr(ion_obj, field, value)
     sample_times_ms = np.arange(0.0, float(case.simulation.duration_ms), float(case.simulation.dt_ms), dtype=float)
     if sample_times_ms.size == 0:
         raise ValueError("simulation.duration_ms must produce at least one sample.")
@@ -121,6 +128,9 @@ def _build_neuron_model(case: ChannelNoConcCase, *, mapping_spec: MappingSpec):
             seg.pas.e = float(case.leak.e_mV)
 
     soma.insert(mapping_spec.neuron.mechanism_name)
+    for attr, value in case.neuron_init_attrs.items():
+        if "." not in attr:
+            setattr(h, attr, value)
     if case.ion_state is not None:
         ion_name = mapping_spec.current_source.ion_name
         if ion_name is None:
@@ -141,7 +151,7 @@ def _build_neuron_model(case: ChannelNoConcCase, *, mapping_spec: MappingSpec):
                     f"channel_params contains unsupported param for mapping: {key!r}."
                 ) from exc
             target = _resolve_neuron_parameter_target(soma=soma, mech_obj=mech_obj, attr_name=attr_name)
-            setattr(target, attr_name, float(value))
+            setattr(target, attr_name, _convert_neuron_value(value, ir_key=key))
 
     return h, soma, soma(0.5)
 
@@ -152,6 +162,18 @@ def _resolve_neuron_erev_field(ion_name: str) -> str:
         "k": "ek",
         "ca": "eca",
     }[ion_name]
+
+
+def _convert_neuron_value(value: float, *, ir_key: str) -> float:
+    """Apply unit conversion so NEURON receives values in its native units.
+
+    The JSON framework stores permeability in SI units (m/s, suffix ``_m_s``),
+    but NEURON MOD files conventionally express permeability in cm/s.
+    Multiply by 100 to convert m/s → cm/s.
+    """
+    if ir_key.endswith("_m_s"):
+        return float(value) * 100.0  # m/s → cm/s
+    return float(value)
 
 
 def _resolve_neuron_current_var(mapping_spec: MappingSpec) -> str:
