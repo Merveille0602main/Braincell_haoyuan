@@ -162,6 +162,8 @@ def _convert_braincell_value(value: Any, *, ir_key: str) -> Any:
         return float(value) * (u.siemens / (u.cm ** 2))
     if ir_key.endswith("_mV"):
         return float(value) * u.mV
+    if ir_key.endswith("_m_s"):
+        return float(value) * (u.metre / u.second)
     return value
 
 

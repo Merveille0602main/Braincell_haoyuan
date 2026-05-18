@@ -42,6 +42,8 @@ __all__ = [
     "CaHVA_MA2020_GrC",
     "Cav2p3_MA2020_GoC",
     "Ca_ZH2019_IO",
+    "CaHVA_SU2015_DCN",
+    "CaL_SU2015_DCN",
 ]
 
 
@@ -775,4 +777,98 @@ class Ca_ZH2019_IO(HH):
         return 40.0 + 30.0 * (
             1.0 / (1.0 + u.math.exp((V + 84.0) / 7.3))
         ) * u.math.exp((V + 160.0) / 30.0)
+
+
+@register_channel("CaHVA_SU2015_DCN") ## 2026.5.17 from jhy
+class CaHVA_SU2015_DCN(HH):
+    """Template-based import of ``CaHVA_SU15_DCN.mod``."""
+
+    __module__ = "braincell.channel"
+    root_type = Calcium
+    gates = (Gate("m", power=3),)
+
+    def __init__(
+        self,
+        size: brainstate.typing.Size,
+        g_max: Union[brainstate.typing.ArrayLike, Callable] = 7.5e-8 * (u.metre / u.second),
+        temp: brainstate.typing.ArrayLike = u.celsius2kelvin(37.0),
+        qdeltat: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
+        name: Optional[str] = None,
+    ):
+        super().__init__(size=size, name=name)
+        self.g_max = braintools.init.param(g_max, self.varshape, allow_none=False)
+        self.temp = braintools.init.param(temp, self.varshape, allow_none=False)
+        self.qdeltat = braintools.init.param(qdeltat, self.varshape, allow_none=False)
+        self.z = 2
+
+    def current(self, V, Ca: IonInfo, *unused):
+        drive = ghk_flux(V=V, ci=Ca.Ci, co=Ca.Co, z=self.z, T=self.temp) ## mode 63行，ghk 不general
+        return -self.g_max * self.conductance_factor(V, Ca) * drive
+
+    def f_m_inf(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        V = V.to_decimal(u.mV)
+        return 1.0 / (1.0 + u.math.exp((V + 34.5) / -9.0))
+
+    def f_m_tau(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        V = V.to_decimal(u.mV)
+        term1 = 31.746 / (u.math.exp((V - 5.0) / -13.89) + 1.0)
+        term2 = 3.97e-4 * 5.0 / u.math.exprel((V + 8.9) / 5.0)
+        return 1.0 / (term1 + term2) / self.qdeltat
+
+
+@register_channel("CaL_SU2015_DCN") ## 2026.5.17 from jhy
+class CaL_SU2015_DCN(HH):
+    """Template-based import of ``CaL_SU15_DCN.mod``."""
+
+    __module__ = "braincell.channel"
+    root_type = Calcium
+    gates = (
+        Gate("m", power=2),
+        Gate("h"),
+    )
+
+    def __init__(
+        self,
+        size: brainstate.typing.Size,
+        g_max: Union[brainstate.typing.ArrayLike, Callable] = 0.01 * (u.mS / u.cm ** 2),
+        E: Union[brainstate.typing.ArrayLike, Callable] = 139.0 * u.mV,
+        qdeltat: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
+        name: Optional[str] = None,
+    ):
+        super().__init__(size=size, name=name)
+        self.g_max = braintools.init.param(g_max, self.varshape, allow_none=False)
+        self.E = braintools.init.param(E, self.varshape, allow_none=False)
+        self.qdeltat = braintools.init.param(qdeltat, self.varshape, allow_none=False)
+
+    def current(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        return self.g_max * self.conductance_factor(V, Ca) * (self.E - V)
+
+    def f_m_inf(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        V = V.to_decimal(u.mV)
+        return 1.0 / (1.0 + u.math.exp((V + 56.0) / -6.2))
+
+    def f_m_tau(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        V = V.to_decimal(u.mV)
+        return (
+            0.333 / (u.math.exp((V + 131.0) / -16.7) + u.math.exp((V + 15.8) / 18.2)) + 0.204
+        ) / self.qdeltat
+
+    def f_h_inf(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        V = V.to_decimal(u.mV)
+        return 1.0 / (1.0 + u.math.exp((V + 80.0) / 4.0))
+
+    def f_h_tau(self, V, Ca: IonInfo, *unused):
+        _ = (Ca, unused)
+        V = V.to_decimal(u.mV)
+        return u.math.where(
+            V < -81.0,
+            0.333 * u.math.exp((V + 466.0) / 66.0),
+            0.333 * u.math.exp((V + 21.0) / -10.5) + 9.32,
+        ) / self.qdeltat
 

@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "label": "DCN CaHVA SU15"
+  },
+  "identity": {
+    "mod_dir": "~/braincell/examples/neuron_compare/Cerebellum_mod/DCN/channel"
+  },
+  "defaults": {
+    "channel_params": {
+      "p_m_s": 7.5e-8
+    }
+  },
+  "mapping": {
+    "current": "ica",
+    "impl_name": {
+      "neuron": "CaHVA_SU15_DCN",
+      "braincell": "CaHVA_SU2015_DCN"
+    },
+    "gate_names": {
+      "common": [
+        "m"
+      ]
+    },
+    "channel_params": {
+      "p_m_s": {
+        "neuron": "perm",
+        "braincell": "g_max"
+      }
+    }
+  },
+  "templates": [
+    "../../templates/vinit_celsius.json",
+    "../../templates/dc.json",
+    "../../templates/ac.json"
+  ]
+}

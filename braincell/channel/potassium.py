@@ -64,6 +64,7 @@ __all__ = [
     "Kv2p2_0010_MA2020_GrC",
     "Kv3p4_MA2020_GrC",
     "Kv4p3_MA2020_GrC",
+    "Kv1p5_MA2020_GrC",
     "Kdr_ZH2019_IO",
 ]
 
@@ -2143,6 +2144,82 @@ class Kv4p3_MA2020_GrC(HH):
 
     def f_b_tau(self, V, K: IonInfo, *unused):
         return 1.0 / (self._b_alpha(V, K, *unused) + self._b_beta(V, K, *unused))
+
+@register_channel("Kv1p5_MA2020_GrC") ##2026.5.17 from JHY
+class Kv1p5_MA2020_GrC(HH):
+    """Template-based import of ``Kv1p5_MA20_GrC.mod``."""
+
+    __module__ = "braincell.channel"
+    root_type = Potassium
+    gates = (
+        Gate("m", power=3, q10=2.2, temp_ref=u.celsius2kelvin(37.0)),
+        Gate("n", q10=2.2, temp_ref=u.celsius2kelvin(37.0)),
+        Gate("u"),
+    )
+
+    def __init__(
+        self,
+        size: brainstate.typing.Size,
+        g_max: Union[brainstate.typing.ArrayLike, Callable] = 0.13195 * (u.mS / u.cm ** 2),
+        temp: brainstate.typing.ArrayLike = u.celsius2kelvin(37.0),
+        Tauact: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
+        Tauinactf: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
+        Tauinacts: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
+        name: Optional[str] = None,
+    ):
+        super().__init__(size=size, name=name)
+        self.g_max = braintools.init.param(g_max, self.varshape, allow_none=False)
+        self.temp = braintools.init.param(temp, self.varshape, allow_none=False)
+        self.Tauact = braintools.init.param(Tauact, self.varshape, allow_none=False)
+        self.Tauinactf = braintools.init.param(Tauinactf, self.varshape, allow_none=False)
+        self.Tauinacts = braintools.init.param(Tauinacts, self.varshape, allow_none=False)
+
+    def current(self, V, K: IonInfo, *unused):
+        V_mV = V.to_decimal(u.mV)
+        act_factor = 0.1 + 1.0 / (1.0 + u.math.exp(-(V_mV - 15.0) / 13.0))
+        return self.g_max * act_factor * self.conductance_factor(V, K) * (K.E - V)
+
+    def _m_alp(self, V_mV):
+        return 0.65 / (u.math.exp(-(V_mV + 10.0) / 8.5) + u.math.exp(-(V_mV - 30.0) / 59.0))
+
+    def _m_bet(self, V_mV):
+        return 0.65 / (2.5 + u.math.exp((V_mV + 82.0) / 17.0))
+
+    def f_m_inf(self, V, K: IonInfo, *unused):
+        _ = (K, unused)
+        V = V.to_decimal(u.mV)
+        return 1.0 / (1.0 + u.math.exp(-(V + 30.3) / 9.6))
+
+    def f_m_tau(self, V, K: IonInfo, *unused):
+        _ = (K, unused)
+        V_mV = V.to_decimal(u.mV)
+        return 1.0 / (self._m_alp(V_mV) + self._m_bet(V_mV)) / 3.0 * self.Tauact
+
+    def _n_alp(self, V_mV):
+        return 0.001 / (2.4 + 10.9 * u.math.exp(-(V_mV + 90.0) / 78.0))
+
+    def _n_bet(self, V_mV):
+        return 0.001 * u.math.exp((V_mV - 168.0) / 16.0)
+
+    def f_n_inf(self, V, K: IonInfo, *unused):
+        _ = (K, unused)
+        V = V.to_decimal(u.mV)
+        return 0.25 + 1.0 / (1.35 + u.math.exp((V + 7.0) / 14.0))
+
+    def f_n_tau(self, V, K: IonInfo, *unused):
+        _ = (K, unused)
+        V_mV = V.to_decimal(u.mV)
+        return 1.0 / (self._n_alp(V_mV) + self._n_bet(V_mV)) / 3.0 * self.Tauinactf
+
+    def f_u_inf(self, V, K: IonInfo, *unused):
+        _ = (K, unused)
+        V = V.to_decimal(u.mV)
+        return 0.1 + 1.0 / (1.1 + u.math.exp((V + 7.0) / 14.0))
+
+    def f_u_tau(self, V, K: IonInfo, *unused):
+        _ = (V, K, unused)
+        return 6800.0 * self.Tauinacts
+
 
 @register_channel("Kdr_ZH2019_IO")
 class Kdr_ZH2019_IO(HH):
