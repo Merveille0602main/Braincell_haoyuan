@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import braincell
-from braincell.channel._base import Gate, HH
+from braincell.channel import Gate, HH
 
 brainstate.environ.set(dt=0.1 * u.ms)
 
@@ -79,7 +79,7 @@ class KChannel(HH):
 
 class MChannel(HH):
     root_type = braincell.ion.Potassium
-    gates = (Gate("p", q10=lambda self: self.q10, temp_ref=lambda self: self.temp_ref),)
+    gates = (Gate("p", q10="q10", temp_ref="temp_ref"),)
 
     def __init__(
         self,

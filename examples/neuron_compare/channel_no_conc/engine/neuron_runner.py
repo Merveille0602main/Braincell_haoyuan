@@ -1,3 +1,18 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Run one NEURON-side case for channel_no_conc."""
 
 
@@ -37,13 +52,7 @@ def run_case(case: ChannelNoConcCase) -> dict[str, Any]:
     h.celsius = float(case.simulation.temperature_celsius)
     h.v_init = float(case.simulation.v_init_mV)
     h.finitialize(h.v_init)
-    for attr, value in case.neuron_init_attrs.items():
-        if "." in attr:
-            ion_type, field = attr.split(".", 1)
-            for seg in section:
-                ion_obj = getattr(seg, f"{ion_type}_ion", None)
-                if ion_obj is not None:
-                    setattr(ion_obj, field, value)
+    _initialize_neuron_ion_state(h=h, section=section, segment=segment, case=case, mapping_spec=mapping_spec)
     sample_times_ms = np.arange(0.0, float(case.simulation.duration_ms), float(case.simulation.dt_ms), dtype=float)
     if sample_times_ms.size == 0:
         raise ValueError("simulation.duration_ms must produce at least one sample.")
@@ -76,6 +85,7 @@ def run_case(case: ChannelNoConcCase) -> dict[str, Any]:
         gate_name: h.Vector().record(getattr(mech_obj, f"_ref_{gate_name}"))
         for gate_name in mapping_spec.neuron.gate_names
     }
+    ion_state_vecs = _build_neuron_ion_state_recorders(segment=segment, mapping_spec=mapping_spec, h=h)
 
     try:
         h.tstop = float(case.simulation.duration_ms)
@@ -88,6 +98,10 @@ def run_case(case: ChannelNoConcCase) -> dict[str, Any]:
         "time_ms": ensure_1d(t_vec, name="neuron.time_ms")[1:],
         "voltage_mV": ensure_1d(v_vec, name="neuron.voltage_mV")[1:],
         "current": {"ix": -ensure_1d(current_vec, name="neuron.current.ix")[1:]},
+        "ion_state": {
+            key: ensure_1d(vec, name=f"neuron.ion_state.{key}")[1:]
+            for key, vec in ion_state_vecs.items()
+        },
         "gates": {
             gate_name: ensure_1d(gate_vec, name=f"neuron.gates.{gate_name}")[1:]
             for gate_name, gate_vec in gate_vecs.items()
@@ -100,18 +114,7 @@ def _build_neuron_model(case: ChannelNoConcCase, *, mapping_spec: MappingSpec):
 
     mechanism_dir = str(Path(case.mod_dir).resolve())
     if mechanism_dir not in _LOADED_MECHANISM_DIRS:
-        # load_mechanisms returns False (no raise) if x86_64/libnrnmech.so is missing.
-        # Must not cache the path on failure, or a later nrnivmodl compile is never picked up
-        # in the same Python process (e.g. Jupyter kernel).
-        loaded = load_mechanisms(mechanism_dir)
-        if not loaded:
-            raise RuntimeError(
-                "NEURON could not load compiled mechanisms from "
-                f"{mechanism_dir!s}. Run `nrnivmodl .` in that directory (expect "
-                "x86_64/libnrnmech.so or your platform equivalent), then retry; "
-                "if you compiled after an earlier failed run, restart the kernel or "
-                "this import would have skipped reloading."
-            )
+        load_mechanisms(mechanism_dir)
         _LOADED_MECHANISM_DIRS.add(mechanism_dir)
     h.load_file("stdrun.hoc")
 
@@ -128,18 +131,16 @@ def _build_neuron_model(case: ChannelNoConcCase, *, mapping_spec: MappingSpec):
             seg.pas.e = float(case.leak.e_mV)
 
     soma.insert(mapping_spec.neuron.mechanism_name)
-    for attr, value in case.neuron_init_attrs.items():
-        if "." not in attr:
-            setattr(h, attr, value)
     if case.ion_state is not None:
         ion_name = mapping_spec.current_source.ion_name
         if ion_name is None:
             raise ValueError("ion_state requires mapping.current to resolve to ik/ina/ica.")
-        setattr(
-            soma,
-            _resolve_neuron_erev_field(ion_name),
-            float(case.ion_state.E_mV),
-        )
+        if case.ion_state.has_reversal:
+            setattr(
+                soma,
+                _resolve_neuron_erev_field(ion_name),
+                float(case.ion_state.E_mV),
+            )
 
     for seg in soma:
         mech_obj = getattr(seg, mapping_spec.neuron.mechanism_name)
@@ -151,7 +152,7 @@ def _build_neuron_model(case: ChannelNoConcCase, *, mapping_spec: MappingSpec):
                     f"channel_params contains unsupported param for mapping: {key!r}."
                 ) from exc
             target = _resolve_neuron_parameter_target(soma=soma, mech_obj=mech_obj, attr_name=attr_name)
-            setattr(target, attr_name, _convert_neuron_value(value, ir_key=key))
+            setattr(target, attr_name, float(value))
 
     return h, soma, soma(0.5)
 
@@ -161,19 +162,47 @@ def _resolve_neuron_erev_field(ion_name: str) -> str:
         "na": "ena",
         "k": "ek",
         "ca": "eca",
+        "cal": "ecal",
     }[ion_name]
 
 
-def _convert_neuron_value(value: float, *, ir_key: str) -> float:
-    """Apply unit conversion so NEURON receives values in its native units.
+def _initialize_neuron_ion_state(*, h, section, segment, case: ChannelNoConcCase, mapping_spec: MappingSpec) -> None:
+    if case.ion_state is None:
+        return
+    ion_name = mapping_spec.current_source.ion_name
+    if ion_name is None:
+        raise ValueError("ion_state requires mapping.current to resolve to ik/ina/ica.")
+    if case.ion_state.has_concentrations:
+        ci_attr, co_attr = _resolve_neuron_concentration_fields(ion_name)
+        setattr(segment, ci_attr, float(case.ion_state.Ci_mM))
+        setattr(segment, co_attr, float(case.ion_state.Co_mM))
+        h.frecord_init()
 
-    The JSON framework stores permeability in SI units (m/s, suffix ``_m_s``),
-    but NEURON MOD files conventionally express permeability in cm/s.
-    Multiply by 100 to convert m/s → cm/s.
-    """
-    if ir_key.endswith("_m_s"):
-        return float(value) * 100.0  # m/s → cm/s
-    return float(value)
+
+def _resolve_neuron_concentration_fields(ion_name: str) -> tuple[str, str]:
+    return {
+        "na": ("nai", "nao"),
+        "k": ("ki", "ko"),
+        "ca": ("cai", "cao"),
+        "cal": ("cali", "calo"),
+    }[ion_name]
+
+
+def _build_neuron_ion_state_recorders(*, segment, mapping_spec: MappingSpec, h) -> dict[str, Any]:
+    ion_name = mapping_spec.current_source.ion_name
+    if ion_name not in {"ca", "cal"}:
+        return {}
+    ci_attr, co_attr = _resolve_neuron_concentration_fields(ion_name)
+    e_attr = _resolve_neuron_erev_field(ion_name)
+    field_names = {
+        "ci_mM": ci_attr,
+        "co_mM": co_attr,
+        "eca_mV": e_attr,
+    }
+    recorders: dict[str, Any] = {}
+    for key, attr_name in field_names.items():
+        recorders[key] = h.Vector().record(getattr(segment, f"_ref_{attr_name}"))
+    return recorders
 
 
 def _resolve_neuron_current_var(mapping_spec: MappingSpec) -> str:
@@ -222,4 +251,3 @@ def _resolve_neuron_current_ref(segment, *, mech_obj=None, mechanism_name: str |
         f"tried segment refs {candidate_names!r}"
         + (" and mechanism ref " + f"'_ref_{current_var}'." if mech_obj is not None else ".")
     )
-

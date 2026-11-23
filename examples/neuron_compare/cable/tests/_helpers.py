@@ -1,9 +1,25 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-
-import importlib.util
 import json
 from pathlib import Path
-import sys
+
+from examples.neuron_compare._suite_loader import load_suite_module
+from examples.neuron_compare._suite_loader import use_double_precision
+
+use_double_precision()
 
 
 CABLE_ROOT = Path(__file__).resolve().parents[1]
@@ -11,16 +27,12 @@ ENGINE_ROOT = CABLE_ROOT / "engine"
 TEMPLATES_ROOT = ENGINE_ROOT
 TEMPLATE_JSON_ROOT = CABLE_ROOT / "templates"
 WORKFLOWS_ROOT = CABLE_ROOT / "workflows"
-MORPHO_FILES = Path(__file__).resolve().parents[3] / "multi_compartment" / "morpho_files"
+MORPHO_FILES = Path(__file__).resolve().parents[4] / "data" / "morphology"
 
 
 def load_module(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec is not None and spec.loader is not None
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    """Load a ``cable`` module by path. See :func:`load_suite_module`."""
+    return load_suite_module(CABLE_ROOT, path, name)
 
 
 def build_case_payload(

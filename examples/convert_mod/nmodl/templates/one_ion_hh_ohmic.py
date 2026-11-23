@@ -1,16 +1,33 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Generated one-ion HH ohmic channel from {{ context.source_file }}."""
 
 
 
+import braincell
 import braintools
 import brainunit as u
 
-from braincell.quad.protocol import DiffEqState
-from braincell.channel import {{context.base_class_name}}
+from braincell._base import IonInfo
+from braincell.quad.protocol import state
 
 
-class {{ context.class_name }}({{ context.base_class_name }}):
+class {{ context.class_name }}(braincell.Channel):
     __module__ = "braincell.channel"
+    root_type = {{ context.root_type }}
 
     def __init__(
         self,
@@ -42,7 +59,7 @@ class {{ context.class_name }}({{ context.base_class_name }}):
 
     def init_state(self, V, {{ context.ion_arg_name }}: IonInfo, batch_size=None):
 {% for gate in context.gates %}
-        self.{{ gate.safe_name }} = DiffEqState(
+        self.{{ gate.safe_name }} = state(
             braintools.init.param(u.math.zeros, self.varshape, batch_size)
         )
 {% endfor %}

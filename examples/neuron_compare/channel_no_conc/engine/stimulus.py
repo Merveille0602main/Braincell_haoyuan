@@ -1,3 +1,18 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Stimulus helpers shared by channel_no_conc."""
 
 
@@ -38,10 +53,10 @@ def build_braincell_stimulus(stimulus: StimulusSpec):
 
     kind = getattr(stimulus, "kind", None)
     if kind == "dc":
-        return braincell.CurrentClamp.step(
-            stimulus.amp_nA * u.nA,
-            stimulus.dur_ms * u.ms,
+        return braincell.CurrentClamp(
             delay=stimulus.delay_ms * u.ms,
+            durations=stimulus.dur_ms * u.ms,
+            amplitudes=stimulus.amp_nA * u.nA,
         )
 
     if kind == "sine":
@@ -50,7 +65,7 @@ def build_braincell_stimulus(stimulus: StimulusSpec):
             frequency=stimulus.frequency_hz * u.Hz,
             phase=stimulus.phase_rad,
             offset=stimulus.offset_nA * u.nA,
-            start=stimulus.start_ms * u.ms,
+            delay=stimulus.start_ms * u.ms,
             duration=stimulus.duration_ms * u.ms,
         )
 

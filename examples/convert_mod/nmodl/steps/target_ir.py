@@ -1,4 +1,17 @@
-
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
 import keyword
 import re
@@ -13,16 +26,19 @@ from .model import SemanticModuleIR
 ION_INFO_MAP = {
     "k": {
         "base_class_name": "PotassiumChannel",
+        "root_type": "braincell.ion.Potassium",
         "ion_arg_name": "K",
         "current_prefix": "IK",
     },
     "na": {
         "base_class_name": "SodiumChannel",
+        "root_type": "braincell.ion.Sodium",
         "ion_arg_name": "Na",
         "current_prefix": "INa",
     },
     "ca": {
         "base_class_name": "CalciumChannel",
+        "root_type": "braincell.ion.Calcium",
         "ion_arg_name": "Ca",
         "current_prefix": "ICa",
     },
@@ -215,6 +231,7 @@ def lower_density_channel_ir(semantic_ir: SemanticModuleIR) -> DensityChannelIR:
     g_max_source_name = None
     ion_name = useion.ion if useion else None
     base_class_name = ION_INFO_MAP.get(ion_name or "", {}).get("base_class_name", "Channel")
+    root_type = ION_INFO_MAP.get(ion_name or "", {}).get("root_type")
     ion_arg_name = ION_INFO_MAP.get(ion_name or "", {}).get("ion_arg_name", "Ion")
 
     if useion is not None:
@@ -333,6 +350,7 @@ def lower_density_channel_ir(semantic_ir: SemanticModuleIR) -> DensityChannelIR:
         registry_name=class_name,
         target_family=target_family,
         base_class_name=base_class_name,
+        root_type=root_type,
         ion_name=ion_name,
         ion_arg_name=ion_arg_name,
         supported=supported,

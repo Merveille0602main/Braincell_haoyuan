@@ -14,6 +14,7 @@
 # ==============================================================================
 
 
+from pathlib import Path
 from typing import Union, Callable
 
 import brainstate
@@ -29,8 +30,9 @@ import braincell
 brainstate.environ.set(dt=0.01 * u.ms)
 
 # Load Input and Output Data
-df_inp_traces = pd.read_csv('neuron_data/input_traces_hh.csv')
-df_out_traces = pd.read_csv('neuron_data/output_traces_hh.csv')
+DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "neuron_traces"
+df_inp_traces = pd.read_csv(DATA_DIR / 'input_traces_hh.csv')
+df_out_traces = pd.read_csv(DATA_DIR / 'output_traces_hh.csv')
 
 area = 20000 * u.um ** 2  # neuronal area
 inp_traces = df_inp_traces.to_numpy()[:, 1:] * 1e9 * u.nA  # input currents
@@ -53,8 +55,8 @@ class INa(braincell.Channel):
         self.V_th = braintools.init.param(vth, self.varshape)
 
     def init_state(self, V, batch_size=None):
-        self.m = braincell.DiffEqState(braintools.init.param(u.math.zeros, self.varshape))
-        self.h = braincell.DiffEqState(braintools.init.param(u.math.zeros, self.varshape))
+        self.m = braincell.state(braintools.init.param(u.math.zeros, self.varshape))
+        self.h = braincell.state(braintools.init.param(u.math.zeros, self.varshape))
 
     #  m channel
     m_alpha = lambda self, V: 0.32 * 4 / u.math.exprel((13. * u.mV - V + self.V_th).to_decimal(u.mV) / 4.)
@@ -94,7 +96,7 @@ class IK(braincell.Channel):
         self.V_th = braintools.init.param(vth, self.varshape)
 
     def init_state(self, V, batch_size=None):
-        self.n = braincell.DiffEqState(braintools.init.param(u.math.zeros, self.varshape))
+        self.n = braincell.state(braintools.init.param(u.math.zeros, self.varshape))
 
     # n channel
     n_alpha = lambda self, V: 0.032 * 5 / u.math.exprel((15. * u.mV - V + self.V_th).to_decimal(u.mV) / 5.)

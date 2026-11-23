@@ -3,11 +3,15 @@
     "label": "DCN CaHVA SU15"
   },
   "identity": {
-    "mod_dir": "~/braincell/examples/neuron_compare/Cerebellum_mod/DCN/channel"
+    "mod_dir": "../../../Cerebellum_mod/DCN/channel"
   },
   "defaults": {
+    "ion_state": {
+      "Ci_mM": 0.00024,
+      "Co_mM": 2.0
+    },
     "channel_params": {
-      "p_m_s": 7.5e-8
+      "perm_cm_s": 7.5e-06
     }
   },
   "mapping": {
@@ -22,9 +26,9 @@
       ]
     },
     "channel_params": {
-      "p_m_s": {
+      "perm_cm_s": {
         "neuron": "perm",
-        "braincell": "g_max"
+        "braincell": "perm"
       }
     }
   },

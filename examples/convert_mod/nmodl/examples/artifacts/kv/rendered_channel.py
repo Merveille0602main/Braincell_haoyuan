@@ -1,13 +1,28 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Generated Braincell density channel from /home/swl/braincell/examples/convert_mod/nmodl/mod_files/kv.mod."""
 
+import braincell
 import braintools
 import brainunit as u
 
 from braincell._base import IonInfo
-from braincell.channel import PotassiumChannel
 from braincell.mech import get_registry
 from braincell.mech import register_channel
-from braincell.quad.protocol import DiffEqState
+from braincell.quad.protocol import state
 
 
 def _to_decimal_if_possible(value, unit):
@@ -23,8 +38,9 @@ def _register_generated_channel(cls):
     return cls
 
 
-class IK_Kv(PotassiumChannel):
+class IK_Kv(braincell.Channel):
     __module__ = "braincell.channel"
+    root_type = braincell.ion.Potassium
 
     def __init__(
         self,
@@ -55,7 +71,7 @@ class IK_Kv(PotassiumChannel):
         return Q10 ** (((self.temp - self.temp_ref) / u.kelvin) / 10.0)
 
     def init_state(self, V, K: IonInfo, batch_size=None):
-        self.n = DiffEqState(
+        self.n = state(
             braintools.init.param(u.math.zeros, self.varshape, batch_size)
         )
 

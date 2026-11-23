@@ -43,11 +43,6 @@ for source, dest in changelogs:
     os.remove(dest)
   shutil.copyfile(source, dest)
 
-import auto_generater
-
-auto_generater.main()
-
-
 
 # -- Project information -----------------------------------------------------
 
@@ -76,7 +71,12 @@ extensions = [
   'sphinx_thebe',
   'sphinx_design',
   'sphinx_math_dollar',
+  'brainx_sphinx_header',
 ]
+
+
+html_baseurl = 'https://brainx.chaobrain.com/braincell/'
+
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
@@ -113,21 +113,29 @@ myst_enable_extensions = [
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+# `design/` and `specs/` are maintainer notes, not part of the published
+# site. They live under docs/ so every piece of prose has one home, but
+# they are excluded here so Sphinx does not warn about documents missing
+# from a toctree.
+exclude_patterns = [
+    '_build', 'Thumbs.db', '.DS_Store', 'design', 'specs',
+    # Legacy tutorials kept in this repository for reference.
+    'advanced_tutorial', 'quickstart', 'tutorial', 'cell.md',
+]
 
 html_theme = "sphinx_book_theme"
-html_logo = "_static/braincell.png"
+html_logo = "https://brainx.chaobrain.com/images/braincell.webp"
 html_title = "braincell"
 html_copy_source = True
 html_sourcelink_suffix = ""
-html_favicon = "_static/braincell.png"
+html_favicon = "https://brainx.chaobrain.com/images/braincell.webp"
 html_last_updated_fmt = ""
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
-jupyter_execute_notebooks = "off"
+nb_execution_mode = "off"
 thebe_config = {
     "repository_url": "https://github.com/binder-examples/jupyter-stacks-datascience",
     "repository_branch": "master",
@@ -140,8 +148,48 @@ html_theme_options = {
 
 # -- Options for myst ----------------------------------------------
 # Notebook cell execution timeout; defaults to 30.
-execution_timeout = 200
+nb_execution_timeout = 200
 
 autodoc_default_options = {
     'exclude-members': '....,default_rng',
 }
+
+# Render NumPy-doc "Attributes" sections as ``:ivar:`` fields rather than
+# standalone object descriptions, so they do not duplicate the members that
+# autodoc emits via ``:members:`` (avoids "duplicate object description").
+napoleon_use_ivar = True
+
+import re as _re
+
+# A field-list line such as ``:param foo: text`` or ``:rtype: int``.
+# The negative lookahead excludes interpreted-text *roles* -- a wrapped
+# prose or math line may legitimately begin with ``:class:`X``` or
+# ``:math:`y```, and treating one as a field line injects a blank line
+# into the middle of a paragraph. That tears the paragraph in two and,
+# when the split falls inside an inline literal or an inline role that
+# spans the line break, makes docutils emit "Inline literal/interpreted
+# text start-string without end-string". A role is always followed
+# immediately by a backtick; a real field line never is.
+_FIELD_LINE = _re.compile(r'^:[^:]+:(?!`)')
+
+
+def _restore_field_list_blank_line(app, what, name, obj, options, lines):
+    """Reinsert the blank line dropped by sphinx_autodoc_typehints.
+
+    The extension injects ``:type ...:`` fields after napoleon has run but
+    drops the blank line napoleon placed before the following section, which
+    makes docutils emit "Field list ends without a blank line". Runs after
+    typehints (higher priority value) and adds the missing blank line back.
+    """
+    out = []
+    for i, line in enumerate(lines):
+        out.append(line)
+        if _FIELD_LINE.match(line):
+            nxt = lines[i + 1] if i + 1 < len(lines) else ''
+            if nxt and not nxt.startswith((' ', '\t', ':')):
+                out.append('')
+    lines[:] = out
+
+
+def setup(app):
+    app.connect('autodoc-process-docstring', _restore_field_list_blank_line, priority=900)

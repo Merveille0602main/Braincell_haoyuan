@@ -1,3 +1,18 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Notebook-facing workflow helpers for cable comparisons."""
 
 import csv
@@ -10,16 +25,29 @@ from typing import Any, Mapping, Sequence
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
 _ENGINE_ROOT = _ROOT / "engine"
-for candidate in (_HERE, _ROOT, _ENGINE_ROOT):
-    if str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
+_SUITES_ROOT = _ROOT.parent
+if str(_SUITES_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SUITES_ROOT))
 
 try:
-    import experiment_schema
-    import run as cable_run
-    from outputs import default_config_run_output_dir, default_sweep_output_dir
-except ImportError as exc:  # pragma: no cover
-    raise ImportError("Could not import cable engine modules for notebook workflow helpers.") from exc
+    from ..engine import experiment_schema
+    from ..engine import run as cable_run
+    from ..engine.outputs import default_config_run_output_dir, default_sweep_output_dir
+except ImportError:
+    # Imported as a top-level module rather than as
+    # ``cable.workflows.workflow_api`` -- the notebooks in this directory put
+    # ``workflows/`` on sys.path and ``import workflow_api``, so there is no
+    # parent package for the relative form to resolve against. Fall back to the
+    # suite-qualified absolute path, never to bare ``experiment_schema`` /
+    # ``run`` / ``outputs``: the sibling ``channel_no_conc`` suite ships modules
+    # under those same names, and whichever suite imported first would silently
+    # hand its engine to the other.
+    try:
+        from cable.engine import experiment_schema
+        from cable.engine import run as cable_run
+        from cable.engine.outputs import default_config_run_output_dir, default_sweep_output_dir
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("Could not import cable engine modules for notebook workflow helpers.") from exc
 
 
 _BATCH_CONFIG_COLUMNS = (

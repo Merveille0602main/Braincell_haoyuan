@@ -1,3 +1,18 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Notebook-facing workflow helpers for channel_no_conc comparisons."""
 
 
@@ -12,16 +27,38 @@ from typing import Any, Mapping, Sequence
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
 _ENGINE_ROOT = _ROOT / "engine"
-for candidate in (_HERE, _ROOT, _ENGINE_ROOT):
+_REPO_ROOT = next(
+    (
+        candidate
+        for candidate in (_ROOT, *_ROOT.parents)
+        if (candidate / "braincell").exists() and (candidate / "examples").exists()
+    ),
+    _ROOT,
+)
+_SUITES_ROOT = _ROOT.parent
+for candidate in (_REPO_ROOT, _SUITES_ROOT):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
 try:
-    import experiment_schema
-    import run as channel_run
-    from outputs import default_config_run_output_dir, default_sweep_output_dir
-except ImportError as exc:  # pragma: no cover
-    raise ImportError("Could not import channel_no_conc template modules for notebook workflow helpers.") from exc
+    from ..engine import experiment_schema
+    from ..engine import run as channel_run
+    from ..engine.outputs import default_config_run_output_dir, default_sweep_output_dir
+except ImportError:
+    # Imported as a top-level module rather than as
+    # ``channel_no_conc.workflows.workflow_api`` -- the notebooks in this
+    # directory put ``workflows/`` on sys.path and ``import workflow_api``, so
+    # there is no parent package for the relative form to resolve against.
+    # Fall back to the suite-qualified absolute path, never to bare
+    # ``experiment_schema`` / ``run`` / ``outputs``: the sibling ``cable`` suite
+    # ships modules under those same names, and whichever suite imported first
+    # would silently hand its engine to the other.
+    try:
+        from channel_no_conc.engine import experiment_schema
+        from channel_no_conc.engine import run as channel_run
+        from channel_no_conc.engine.outputs import default_config_run_output_dir, default_sweep_output_dir
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("Could not import channel_no_conc template modules for notebook workflow helpers.") from exc
 
 
 _BATCH_CONFIG_COLUMNS = (
@@ -220,7 +257,6 @@ def run_notebook_config_workflow(
     plot: bool | None = None,
     expand_only: bool = False,
     raise_on_failure: bool = False,
-    progress: bool = False,
 ) -> dict[str, Any]:
     inputs = load_config_workflow_inputs(config_path)
     resolved_out_dir = (
@@ -233,7 +269,6 @@ def run_notebook_config_workflow(
         out_dir=resolved_out_dir,
         expand_only=bool(expand_only),
         plot=plot,
-        progress=bool(progress),
     )
     run_info = {
         "status": int(result["status"]),
@@ -725,6 +760,9 @@ def plot_observable_metric_boxplots(
     import numpy as np
 
     ok_df = summary_tables["ok_df"]
+    if "observable" in ok_df:
+        ok_df = ok_df.copy()
+        ok_df["observable"] = ok_df["observable"].astype(str)
     families = (
         ("voltage", "Voltage"),
         ("current.", "Current"),

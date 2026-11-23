@@ -1,137 +1,225 @@
 Biologically Detailed Brain Cell Modeling
 =========================================
 
+``braincell`` is a Python library for **biophysically detailed neuron modeling**,
+from single-compartment Hodgkin–Huxley cells to fully morphological
+multi-compartment reconstructions with realistic dendrites and axons.
 
-``braincell`` provides a unified interface for modeling single-compartment and multi-compartment Hodgkin-Huxley-styled neuron models.
-It is built on top of `JAX <https://github.com/jax-ml/jax>`_ and `brainstate <https://github.com/chaobrain/brainstate>`_, offering a highly parallelized and efficient simulation of biophysically detailed brain cell models.
+It is built on `JAX <https://github.com/jax-ml/jax>`_ and
+`brainstate <https://github.com/chaobrain/brainstate>`_, so every model is
+**differentiable**, **JIT-compiled**, and runs unchanged on **CPU, GPU, and TPU**.
 
-Features
---------
+.. grid:: 1 2 2 3
+   :gutter: 3
 
-- **Biophysical State Precision**: ``BrainCell`` enables biophysically accurate modeling of neural dynamics across scales, from ion channel gating to network-wide population activity.
-- **Stiff Dynamics Optimization**: Features specialized solvers optimized for stiff neural systems, efficiently handling rapid biophysical transitions.
-- **JAX-based**: Leverages JAX for high-performance computing, automatic differentiation, and compilation to XLA (CPU/GPU/TPU).
+   .. grid-item-card:: 🚀 Get Started
+      :link: getting_started/installation
+      :link-type: doc
+
+      Install ``braincell`` and simulate your first neuron in a few minutes.
+
+   .. grid-item-card:: 💡 Concepts
+      :link: concepts/architecture
+      :link-type: doc
+
+      The mental model behind cells, mechanisms, morphology, discretization,
+      and integration.
+
+   .. grid-item-card:: 🧪 Tutorials & Examples
+      :link: tutorials/index
+      :link-type: doc
+
+      Step-by-step notebooks for single- and multi-compartment models.
+
+   .. grid-item-card:: 📐 Numerical Integration
+      :link: integration/index
+      :link-type: doc
+
+      Choose, compose, and write the solvers that advance your equations.
+
+   .. grid-item-card:: 📂 File Formats & IO
+      :link: file_formats/index
+      :link-type: doc
+
+      Load morphologies from SWC, ASC, NeuroML2, and NeuroMorpho.Org.
+
+   .. grid-item-card:: 🔧 API Reference
+      :link: apis/braincell
+      :link-type: doc
+
+      The complete public API: classes, functions, channels, and ions.
 
 
-----
+What is ``braincell``?
+----------------------
 
-Installation
-^^^^^^^^^^^^
+``braincell`` lets you describe a neuron the way a neuroscientist thinks about
+one — geometry, ion channels, ion species, and stimuli — and then turns that
+description into a fast, differentiable simulation. Its design goals are:
 
-.. tab-set::
-
-    .. tab-item:: CPU
-
-       .. code-block:: bash
-
-          pip install -U braincell[cpu]
-
-    .. tab-item:: GPU (CUDA)
-
-       .. code-block:: bash
-
-          pip install -U braincell[cuda12]
-
-          # or
-          pip install -U braincell[cuda13]
-
-    .. tab-item:: TPU
-
-       .. code-block:: bash
-
-          pip install -U braincell[tpu]
+- **Biophysical precision.** Model neural dynamics across scales, from single
+  ion-channel gating to morphologically detailed dendritic computation.
+- **Stiff-system performance.** A registry of numerical solvers
+  (:mod:`braincell.quad`) — explicit, implicit, exponential-Euler, and staggered
+  cable solvers — handles the stiff dynamics of biophysical neurons efficiently.
+- **Differentiability.** Because everything runs on JAX, gradients flow through
+  whole simulations, enabling gradient-based fitting and optimization.
+- **One canonical API.** Mechanisms are *declared* with explicit physical units
+  and *painted* or *placed* onto a cell, keeping declaration cleanly separated
+  from the runtime that executes it.
 
 
+Feature highlights
+------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Capability
+     - What you get
+   * - **Single-compartment neurons**
+     - :class:`braincell.SingleCompartment` with a large library of Na, K, Ca,
+       HCN, and K-Ca channels and selectable integrators.
+   * - **Multi-compartment cells**
+     - :class:`braincell.Cell` with declarative mechanism painting
+       (``cell.paint``) and point-process placement (``cell.place``) onto
+       morphological regions.
+   * - **Morphology system**
+     - :class:`braincell.Morphology` with an immutable :class:`~braincell.Branch`
+       geometry and typed sections (:class:`~braincell.Soma`,
+       :class:`~braincell.Dendrite`, :class:`~braincell.Axon`, …).
+   * - **File-format readers**
+     - SWC, Neurolucida ASC, and NeuroML2 readers, plus a full
+       `NeuroMorpho.Org <https://neuromorpho.org>`_ client with caching.
+   * - **Visualization**
+     - :mod:`braincell.vis`: 2-D tree layouts (matplotlib) and 3-D rendering
+       (PyVista / Plotly), color-by-values, and morphometry plots.
+   * - **Numerical integration**
+     - :mod:`braincell.quad`: a registry of solvers selectable by name.
+   * - **Declarative mechanisms**
+     - :mod:`braincell.mech`: ``Channel``, ``Ion``, ``CableProperty``,
+       ``CurrentClamp``, ``Synapse``, and probe specifications.
 
 
+A first taste
+-------------
 
-Quick Start
------------
-
-Here is an example to model a **single-compartment** thalamus neuron model:
+A single-compartment thalamic relay (HTC) neuron, assembled from ion species
+and channels:
 
 .. code-block:: python
 
    import braincell
-   import brainstate
    import braintools
    import brainunit as u
 
    class HTC(braincell.SingleCompartment):
        def __init__(self, size, solver: str = 'ind_exp_euler'):
-           super().__init__(size, V_initializer=braintools.init.Constant(-65. * u.mV), V_th=20. * u.mV, solver=solver)
+           super().__init__(size, V_initializer=braintools.init.Constant(-65. * u.mV),
+                            V_th=20. * u.mV, solver=solver)
 
            self.na = braincell.ion.SodiumFixed(size, E=50. * u.mV)
-           self.na.add(INa=braincell.channel.INa_Ba2002(size, V_sh=-30 * u.mV))
+           self.na.add(INa=braincell.channel.Na_Ba2002(size, V_sh=-30 * u.mV))
 
            self.k = braincell.ion.PotassiumFixed(size, E=-90. * u.mV)
-           self.k.add(IKL=braincell.channel.IK_Leak(size, g_max=0.01 * (u.mS / u.cm ** 2)))
-           self.k.add(IDR=braincell.channel.IKDR_Ba2002(size, V_sh=-30. * u.mV, phi=0.25))
+           self.k.add(IDR=braincell.channel.KDR_Ba2002(size, V_sh=-30. * u.mV))
 
            self.ca = braincell.ion.CalciumDetailed(size, C_rest=5e-5 * u.mM, tau=10. * u.ms, d=0.5 * u.um)
-           self.ca.add(ICaL=braincell.channel.ICaL_IS2008(size, g_max=0.5 * (u.mS / u.cm ** 2)))
-           self.ca.add(ICaN=braincell.channel.ICaN_IS2008(size, g_max=0.5 * (u.mS / u.cm ** 2)))
-           self.ca.add(ICaT=braincell.channel.ICaT_HM1992(size, g_max=2.1 * (u.mS / u.cm ** 2)))
-           self.ca.add(ICaHT=braincell.channel.ICaHT_HM1992(size, g_max=3.0 * (u.mS / u.cm ** 2)))
+           self.ca.add(ICaL=braincell.channel.CaL_IS2008(size, g_max=0.5 * (u.mS / u.cm ** 2)))
 
-           self.kca = braincell.MixIons(self.k, self.ca)
-           self.kca.add(IAHP=braincell.channel.IAHP_De1994(size, g_max=0.3 * (u.mS / u.cm ** 2)))
-
-           self.Ih = braincell.channel.Ih_HM1992(size, g_max=0.01 * (u.mS / u.cm ** 2), E=-43 * u.mV)
+           self.Ih = braincell.channel.HCN_HM1992(size, g_max=0.01 * (u.mS / u.cm ** 2), E=-43 * u.mV)
            self.IL = braincell.channel.IL(size, g_max=0.0075 * (u.mS / u.cm ** 2), E=-70 * u.mV)
 
+See :doc:`getting_started/first_steps` to run this model and plot a spike train,
+or :doc:`concepts/architecture` to understand each piece.
+
+
+How this documentation is organized
+-----------------------------------
+
+The docs are layered by what you are trying to do:
+
+- **Get Started** — install the package and run a first model. Start here if
+  you are new.
+- **Concepts** — the design and vocabulary of ``braincell``: cells, mechanisms,
+  morphology, discretization, and integration. Read this to build a mental
+  model before diving deep.
+- **Modeling guides** — task-focused :doc:`tutorials <tutorials/index>` and
+  runnable :doc:`examples <examples/index>` for single- and multi-compartment
+  models, and for :doc:`numerical integration <integration/index>`.
+- **File Formats & IO** — how to load and save morphologies.
+- **Developer Guide** — project layout, testing, and how to extend the library.
+- **API Reference** — the exhaustive, generated reference for every public
+  symbol.
+
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Quickstart
    :hidden:
-
-   quickstart/concepts-en.ipynb
-   quickstart/concepts-zh.ipynb
-
-
-.. toctree::
    :maxdepth: 1
-   :caption: Tutorials
-   :hidden:
+   :caption: Get Started
 
-   tutorial/channel-en.ipynb
-   tutorial/channel-zh.ipynb
-   tutorial/ion-en.ipynb
-   tutorial/ion-zh.ipynb
-   tutorial/cell-en.ipynb
-   tutorial/cell-zh.ipynb
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Advanced Tutorials
-   :hidden:
-
-   advanced_tutorial/rationale-en.ipynb
-   advanced_tutorial/rationale-zh.ipynb
-   advanced_tutorial/differential_equation-en.ipynb
-   advanced_tutorial/differential_equation-zh.ipynb
-   advanced_tutorial/examples.rst
-   advanced_tutorial/more-en.ipynb
-   advanced_tutorial/more-zh.ipynb
+   getting_started/installation
+   getting_started/overview
+   getting_started/first_steps
 
 .. toctree::
    :hidden:
    :maxdepth: 2
-   :caption: API Documentation
+   :caption: Concepts
 
+   concepts/architecture
+   concepts/units
+   concepts/cells
+   concepts/morphology
+   concepts/mechanisms
+   concepts/ions_channels
+   concepts/regions_locsets
+   concepts/discretization
+   concepts/integration
+
+.. toctree::
+   :hidden:
+   :maxdepth: 2
+   :caption: Modeling Guides
+
+   tutorials/index
+   examples/index
+   integration/index
+   file_formats/index
+
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+   :caption: Developer Guide
+
+   developer/contributing
+   developer/project_layout
+   developer/testing
+   developer/extending
+   developer/troubleshooting
+
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+   :caption: API Reference
+
+   apis/changelog.md
    apis/braincell.rst
    apis/morphology.rst
-   apis/braincell.neuron.rst
-   apis/braincell.synapse.rst
    apis/braincell.ion.rst
    apis/braincell.channel.rst
+   apis/braincell.synapse.rst
+   apis/braincell.mech.rst
+   apis/filter.rst
+   apis/io.rst
    apis/integration.rst
    apis/vis.rst
-   apis/changelog.md
 
 
 Ecosystem
 ---------
 
-BrainCell is one part of our `brain modeling ecosystem <https://brainmodeling.readthedocs.io/>`_.
+``braincell`` is one part of the `BrainX brain-modeling ecosystem
+<https://brainx.chaobrain.com/>`_. If you use it in your research, please cite
+it via its `Zenodo DOI <https://doi.org/10.5281/zenodo.14969987>`_.

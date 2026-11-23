@@ -20,7 +20,7 @@ UNITS {
 }
 
 PARAMETER {
-	gKur=0.13195e-3 (S/cm2) <0,1e9>
+	 gKur=0.13195e-3 (S/cm2) <0,1e9>
 	Tauact=1 (ms)
 	Tauinactf=1 (ms)
 	Tauinacts=1 (ms)
@@ -55,15 +55,15 @@ INITIAL {
 
 BREAKPOINT { LOCAL z
 	z = (R*(celsius+273.15))/F
-	SOLVE states METHOD derivimplicit
-		ik = gKur*(0.1 + 1/(1 + exp(-(v - 15)/13)))*m*m*m*n*u*(v - ek)
+	SOLVE states METHOD cnexp
+	ik = gKur*(0.1 + 1/(1 + exp(-(v - 15)/13)))*m*m*m*n*u*(v - ek)
 	ino=gnonspec*(0.1 + 1/(1 + exp(-(v - 15)/13)))*m*m*m*n*u*(v - z*log((nao+ko)/(nai+ki)))
 }
 
 DERIVATIVE states {	: exact when v held constant
 	rates(v)
 	m' = (minf - m)/mtau
-        n' = (ninf - n)/ntau
+    n' = (ninf - n)/ntau
 	u' = (uinf - u)/utau
 }
 

@@ -1,4 +1,17 @@
-
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
 import json
 import os
@@ -44,6 +57,7 @@ class WorkflowInputTest(unittest.TestCase):
                 root / "kv_test.json",
                 build_main_config_payload(["templates/smoke.json"]),
             )
+            expected_mod_dir = Path(MOD_VALIDATE_MOD_DIR).resolve()
 
             info = workflow_api.load_workflow_inputs(config_path, template_path)
 
@@ -53,7 +67,7 @@ class WorkflowInputTest(unittest.TestCase):
         self.assertEqual(info["group_id"], "smoke")
         self.assertEqual(info["n_expanded_cases"], 2)
         self.assertEqual(info["mapping"]["current"], "ik")
-        self.assertEqual(info["mod_dir"], Path(MOD_VALIDATE_MOD_DIR).resolve())
+        self.assertEqual(info["mod_dir"], expected_mod_dir)
 
     def test_load_config_workflow_inputs_reads_declared_templates_and_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -108,7 +122,32 @@ class WorkflowInputTest(unittest.TestCase):
         records = workflow_api.discover_batch_configs(CHANNEL_NO_CONC_ROOT / "configs" / "ma24_pc")
 
         records_by_name = {record["config_name"]: record for record in records}
-        self.assertEqual(set(records_by_name), {"hcn1_ma24_pc", "kir2p3_ma24_pc", "kv1p1_ma24_pc", "kv3p4_ma24_pc", "kv4p3_ma24_pc"})
+        self.assertEqual(
+            set(records_by_name),
+            {
+                "cav2p1_ma24_pc",
+                "cav2p1_ma24_pc_frozen",
+                "cav3p1_ma24_pc",
+                "cav3p1_ma24_pc_frozen",
+                "cav3p1_test2_pc24",
+                "cav3p1_test_pc24",
+                "cav3p2_ma24_pc",
+                "cav3p3_ma24_pc",
+                "cav3p3_ma24_pc_frozen",
+                "hcn1_ma24_pc",
+                "kca1p1_ma24_pc",
+                "kca2p2_ma24_pc",
+                "kca2p2_ma24_pc_dep_o1",
+                "kca3p1_ma24_pc",
+                "kir2p3_ma24_pc",
+                "kv1p1_ma24_pc",
+                "kv1p5_ma24_pc",
+                "kv3p3_ma24_pc",
+                "kv3p4_ma24_pc",
+                "kv4p3_ma24_pc",
+                "nav1p6_ma24_pc",
+            },
+        )
         self.assertIn("hcn1_ma24_pc", records_by_name)
         self.assertEqual(records_by_name["hcn1_ma24_pc"]["n_templates"], 3)
 
@@ -116,7 +155,25 @@ class WorkflowInputTest(unittest.TestCase):
         records = workflow_api.discover_batch_configs(CHANNEL_NO_CONC_ROOT / "configs" / "ma25_bc")
 
         records_by_name = {record["config_name"]: record for record in records}
-        self.assertEqual(set(records_by_name), {"hcn1_ma25_bc", "nav1p6_ma25_bc", "kir2p3_ma25_bc", "kv1p1_ma25_bc", "kv3p4_ma25_bc", "kv4p3_ma25_bc"})
+        self.assertEqual(
+            set(records_by_name),
+            {
+                "cav1p2_ma25_bc",
+                "cav1p3_ma25_bc",
+                "cav2p1_ma25_bc",
+                "cav3p2_ma25_bc",
+                "hcn1_ma25_bc",
+                "kca1p1_ma25_bc",
+                "kca2p2_ma25_bc",
+                "kca3p1_ma25_bc",
+                "kir2p3_ma25_bc",
+                "kv1p1_ma25_bc",
+                "kv3p4_ma25_bc",
+                "kv4p3_ma25_bc",
+                "nav1p1_ma25_bc",
+                "nav1p6_ma25_bc",
+            },
+        )
         self.assertIn("hcn1_ma25_bc", records_by_name)
         self.assertEqual(records_by_name["hcn1_ma25_bc"]["n_templates"], 3)
 
@@ -127,7 +184,10 @@ class WorkflowInputTest(unittest.TestCase):
         self.assertEqual(
             set(records_by_name),
             {
+                "cav1p2_ma20_goc",
+                "cav1p3_ma20_goc",
                 "nav1p6_ma20_goc",
+                "cav3p1_ma20_goc",
                 "hcn1_ma20_goc",
                 "hcn2_ma20_goc",
                 "km_ma20_goc",
@@ -149,7 +209,17 @@ class WorkflowInputTest(unittest.TestCase):
         records_by_name = {record["config_name"]: record for record in records}
         self.assertEqual(
             set(records_by_name),
-            {"hcn_su15_dcn", "naf_su15_dcn", "nap_su15_dcn", "fkdr_su15_dcn", "skdr_su15_dcn"},
+            {
+                "cahva_su15_dcn",
+                "calva_su15_dcn",
+                "hcn_su15_dcn",
+                "naf_su15_dcn",
+                "nap_su15_dcn",
+                "fkdr_su15_dcn",
+                "skdr_su15_dcn",
+                "sk_su15_dcn",
+                "cal_su15_dcn",
+            },
         )
         self.assertEqual(records_by_name["hcn_su15_dcn"]["n_templates"], 3)
 
@@ -159,7 +229,21 @@ class WorkflowInputTest(unittest.TestCase):
         records_by_name = {record["config_name"]: record for record in records}
         self.assertEqual(
             set(records_by_name),
-            {"hcn1_ri21_sc", "km_ri21_sc", "kir2p3_ri21_sc", "kv1p1_ri21_sc", "kv3p4_ri21_sc", "kv4p3_ri21_sc"},
+            {
+                "cav2p1_ri21_sc",
+                "cav3p2_ri21_sc",
+                "cav3p3_ri21_sc",
+                "hcn1_ri21_sc",
+                "kca1p1_ri21_sc",
+                "kca2p2_ri21_sc",
+                "km_ri21_sc",
+                "kir2p3_ri21_sc",
+                "kv1p1_ri21_sc",
+                "kv3p4_ri21_sc",
+                "kv4p3_ri21_sc",
+                "nav1p1_ri21_sc",
+                "nav1p6_ri21_sc",
+            },
         )
         self.assertEqual(records_by_name["hcn1_ri21_sc"]["n_templates"], 3)
 
@@ -169,7 +253,17 @@ class WorkflowInputTest(unittest.TestCase):
         records_by_name = {record["config_name"]: record for record in records}
         self.assertEqual(
             set(records_by_name),
-            {"hcn_su15_dcn", "naf_su15_dcn", "nap_su15_dcn", "fkdr_su15_dcn", "skdr_su15_dcn"},
+            {
+                "cahva_su15_dcn",
+                "calva_su15_dcn",
+                "hcn_su15_dcn",
+                "naf_su15_dcn",
+                "nap_su15_dcn",
+                "fkdr_su15_dcn",
+                "skdr_su15_dcn",
+                "sk_su15_dcn",
+                "cal_su15_dcn",
+            },
         )
         self.assertEqual(records_by_name["hcn_su15_dcn"]["n_templates"], 3)
 

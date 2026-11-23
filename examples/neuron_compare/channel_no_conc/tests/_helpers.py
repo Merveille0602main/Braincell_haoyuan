@@ -1,23 +1,40 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-
-import importlib.util
 import json
 from pathlib import Path
-import sys
+
+from examples.neuron_compare._suite_loader import load_suite_module
+from examples.neuron_compare._suite_loader import use_double_precision
+
+use_double_precision()
 
 
 CHANNEL_NO_CONC_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_ROOT = CHANNEL_NO_CONC_ROOT / "engine"
-MOD_VALIDATE_MOD_DIR = "/home/swl/braincell/examples/convert_mod/mod_validate/mods"
+
+# Resolved from this file rather than hardcoded: `workflow_api.load_workflow_inputs`
+# raises FileNotFoundError when `identity.mod_dir` does not exist, so an absolute
+# path into one developer's home directory fails everywhere else.
+EXAMPLES_ROOT = Path(__file__).resolve().parents[3]
+MOD_VALIDATE_MOD_DIR = str(EXAMPLES_ROOT / "convert_mod" / "mod_validate" / "mods")
 
 
 def load_module(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec is not None and spec.loader is not None
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    """Load a ``channel_no_conc`` module by path. See :func:`load_suite_module`."""
+    return load_suite_module(CHANNEL_NO_CONC_ROOT, path, name)
 
 
 def build_mapping_payload(
@@ -33,6 +50,7 @@ def build_mapping_payload(
         "na": "ina",
         "k": "ik",
         "ca": "ica",
+        "cal": "ical",
     }[current_kind]
     return {
         "current": current_var,
@@ -72,7 +90,7 @@ def build_case_payload(
         "stimulus": stimulus or {"kind": "dc", "delay_ms": 0.0, "dur_ms": 2.0, "amp_nA": 0.2},
         **(
             {"ion_state": {"E_mV": -80.0}}
-            if (mapping or build_mapping_payload())["current"] in {"ina", "ik", "ica"}
+            if (mapping or build_mapping_payload())["current"] in {"ina", "ik", "ica", "ical"}
             else {}
         ),
         "channel_params": {"g_max_S_cm2": 0.0},
@@ -122,5 +140,10 @@ def build_main_config_payload(
 
 
 def write_json(path: Path, payload: dict) -> Path:
+    identity = payload.get("identity") if isinstance(payload, dict) else None
+    if isinstance(identity, dict):
+        mod_dir = identity.get("mod_dir")
+        if isinstance(mod_dir, str) and mod_dir and not Path(mod_dir).is_absolute():
+            (path.parent / mod_dir).mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload))
     return path
