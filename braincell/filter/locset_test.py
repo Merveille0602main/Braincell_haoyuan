@@ -1,0 +1,380 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+
+import pickle
+import unittest
+
+import brainunit as u
+import numpy as np
+
+from braincell import Branch, Morphology
+from braincell.filter import (
+    AtLocation,
+    BranchPoints,
+    BranchSlice,
+    EmptyRegion,
+    ForkPoints,
+    LocsetConcatOp,
+    LocsetBatch,
+    LocsetMask,
+    LocsetSetOp,
+    LocsetUniqueOp,
+    RandomSamples,
+    RootLocation,
+    Terminals,
+    UniformSamples,
+    at,
+)
+from braincell.filter import locset as locset_mod
+
+
+def _build_branchpoint_morphology() -> Morphology:
+    soma = Branch.from_lengths(lengths=[20.0] * u.um, radii=[10.0, 10.0] * u.um, type="soma")
+    basal = Branch.from_lengths(lengths=[30.0] * u.um, radii=[2.0, 1.0] * u.um, type="basal_dendrite")
+    axon = Branch.from_lengths(lengths=[10.0] * u.um, radii=[0.8, 0.5] * u.um, type="axon")
+    apical = Branch.from_lengths(lengths=[20.0] * u.um, radii=[1.5, 1.0] * u.um, type="apical_dendrite")
+    tuft = Branch.from_lengths(lengths=[15.0] * u.um, radii=[0.9, 0.7] * u.um, type="apical_dendrite")
+
+    tree = Morphology.from_root(soma, name="soma")
+    tree.soma.attach(basal, name="basal", parent_x=1.0)
+    tree.soma.attach(axon, name="axon", parent_x=0.5)
+    tree.soma.attach(apical, name="apical", parent_x=0.5)
+    tree.soma.basal.tuft = tuft
+    return tree
+
+
+def _build_sampling_tree() -> Morphology:
+    soma = Branch.from_lengths(lengths=[10.0] * u.um, radii=[10.0, 10.0] * u.um, type="soma")
+    dend = Branch.from_lengths(lengths=[30.0] * u.um, radii=[2.0, 1.0] * u.um, type="basal_dendrite")
+
+    tree = Morphology.from_root(soma, name="soma")
+    tree.soma.dend = dend
+    return tree
+
+
+def _branch(*, branch_type: str = "dendrite") -> Branch:
+    return Branch.from_lengths(lengths=[10.0] * u.um, radii=[1.0, 1.0] * u.um, type=branch_type)
+
+
+def _point_is_in_region(
+    point: tuple[int, float],
+    intervals: tuple[tuple[int, float, float], ...],
+    *,
+    epsilon: float = 1e-12,
+) -> bool:
+    branch, x = point
+    for interval_branch, prox, dist in intervals:
+        if interval_branch != branch:
+            continue
+        if (x + epsilon) >= prox and (x - epsilon) <= dist:
+            return True
+    return False
+
+
+class BasicLocsetTest(unittest.TestCase):
+    def test_at_location_accepts_branch_index_and_name(self) -> None:
+        tree = _build_branchpoint_morphology()
+
+        by_index = at(0, 0.5).evaluate(tree)
+        by_name = at("basal", 0.25).evaluate(tree)
+        explicit = AtLocation(branch="axon", x=1.0).evaluate(tree)
+
+        self.assertEqual(by_index.points, ((0, 0.5),))
+        self.assertEqual(by_index.display_names, ("soma(0.5)",))
+        self.assertEqual(by_name.points, ((1, 0.25),))
+        self.assertEqual(by_name.display_names, ("basal(0.25)",))
+        self.assertEqual(explicit.points, ((2, 1.0),))
+        self.assertEqual(explicit.display_names, ("axon(1)",))
+
+    def test_at_location_rejects_invalid_branch_reference_and_x(self) -> None:
+        tree = _build_branchpoint_morphology()
+
+        with self.assertRaises(KeyError):
+            at("missing", 0.5).evaluate(tree)
+        with self.assertRaises(IndexError):
+            at(99, 0.5).evaluate(tree)
+        with self.assertRaises(TypeError):
+            at(1.2, 0.5).evaluate(tree)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            at(0, -0.1).evaluate(tree)
+        with self.assertRaises(ValueError):
+            at(0, 1.1).evaluate(tree)
+
+    def test_fork_points_returns_topology_junctions_with_three_branches(self) -> None:
+        tree = _build_branchpoint_morphology()
+
+        locset = ForkPoints().evaluate(tree)
+
+        self.assertEqual(locset.points, ((0, 0.5),))
+        self.assertEqual(locset.display_names, ("soma(0.5)",))
+        self.assertIs(BranchPoints, ForkPoints)
+
+    def test_terminals_returns_leaf_branch_distal_points(self) -> None:
+        tree = _build_branchpoint_morphology()
+
+        locset = Terminals().evaluate(tree)
+
+        self.assertEqual(locset.points, ((2, 1.0), (3, 1.0), (4, 1.0)))
+
+    def test_locset_boolean_ops_union_intersection_difference(self) -> None:
+        tree = _build_branchpoint_morphology()
+
+        root_mid = RootLocation(x=0.5)
+        terminals = Terminals()
+        branch_points = BranchPoints()
+
+        union_expr = root_mid | terminals
+        inter_expr = branch_points & root_mid
+        diff_expr = union_expr - root_mid
+
+        union_locset = union_expr.evaluate(tree)
+        inter_locset = inter_expr.evaluate(tree)
+        diff_locset = diff_expr.evaluate(tree)
+
+        self.assertEqual(union_locset.points, ((0, 0.5), (2, 1.0), (3, 1.0), (4, 1.0)))
+        self.assertEqual(inter_locset.points, ((0, 0.5),))
+        self.assertEqual(diff_locset.points, ((2, 1.0), (3, 1.0), (4, 1.0)))
+
+    def test_concat_preserves_order_and_duplicate_rows(self) -> None:
+        tree = _build_sampling_tree()
+        expr = at("dend", 0.25) + at("soma", 0.5) + at("dend", 0.25)
+
+        locset = expr.evaluate(tree)
+
+        self.assertEqual(locset.points, ((1, 0.25), (0, 0.5), (1, 0.25)))
+        self.assertEqual(locset.display_names, ("dend(0.25)", "soma(0.5)", "dend(0.25)"))
+
+    def test_set_ops_are_stable_and_unique(self) -> None:
+        tree = _build_sampling_tree()
+        left = at("dend", 0.8) + at("soma", 0.5) + at("dend", 0.8)
+        right = at("soma", 0.5) + at("dend", 0.2) + at("soma", 0.5)
+
+        self.assertEqual((left | right).evaluate(tree).points, ((1, 0.8), (0, 0.5), (1, 0.2)))
+        self.assertEqual((left & right).evaluate(tree).points, ((0, 0.5),))
+        self.assertEqual((left - right).evaluate(tree).points, ((1, 0.8),))
+        self.assertEqual(left.unique().evaluate(tree).points, ((1, 0.8), (0, 0.5)))
+
+
+class LocsetMaskTest(unittest.TestCase):
+    def test_column_constructor_copies_and_freezes_storage(self) -> None:
+        branch_id = np.asarray([2, 1, 2], dtype=np.int32)
+        branch_x = np.asarray([0.3, 0.2, 0.3], dtype=np.float32)
+
+        mask = LocsetMask.from_columns(branch_id, branch_x, ("a", "b", "c"))
+        branch_id[0] = 99
+        branch_x[0] = 0.9
+
+        np.testing.assert_array_equal(mask.branch_id, np.asarray([2, 1, 2]))
+        np.testing.assert_allclose(mask.branch_x, np.asarray([0.3, 0.2, 0.3]), atol=1e-7)
+        self.assertFalse(mask.branch_id.flags.writeable)
+        self.assertFalse(mask.branch_x.flags.writeable)
+        with self.assertRaises(ValueError):
+            mask.branch_id[0] = 3
+
+    def test_compatibility_rows_optional_names_and_immediate_unique(self) -> None:
+        mask = LocsetMask(points=((2, 0.3), (1, 0.2), (2, 0.3)))
+        named = LocsetMask(
+            points=((2, 0.3), (1, 0.2), (2, 0.3)),
+            display_names=("first", "middle", "last"),
+        )
+
+        self.assertEqual(mask.points, ((2, 0.3), (1, 0.2), (2, 0.3)))
+        self.assertIsNone(mask.display_names)
+        self.assertEqual(named.unique().points, ((2, 0.3), (1, 0.2)))
+        self.assertEqual(named.unique().display_names, ("first", "middle"))
+        self.assertEqual(named, LocsetMask(named.points, named.display_names))
+        self.assertEqual(hash(named), hash(LocsetMask(named.points, named.display_names)))
+        self.assertEqual(pickle.loads(pickle.dumps(named)), named)
+
+    def test_column_constructor_validates_shape_dtype_coordinate_and_names(self) -> None:
+        with self.assertRaises(ValueError):
+            LocsetMask.from_columns([[0]], [0.5])
+        with self.assertRaises(ValueError):
+            LocsetMask.from_columns([0, 1], [0.5])
+        with self.assertRaises(TypeError):
+            LocsetMask.from_columns([0.0], [0.5])
+        with self.assertRaises(ValueError):
+            LocsetMask.from_columns([-1], [0.5])
+        with self.assertRaises(TypeError):
+            LocsetMask.from_columns([0], ["0.5"])
+        with self.assertRaises(ValueError):
+            LocsetMask.from_columns([0], [np.nan])
+        with self.assertRaises(ValueError):
+            LocsetMask.from_columns([0], [1.1])
+        with self.assertRaises(ValueError):
+            LocsetMask(points=((0, 0.5),), display_names=())
+        with self.assertRaises(TypeError):
+            LocsetMask(points=((0, True),))
+        with self.assertRaises(ValueError):
+            LocsetMask(points=((-1, 0.5),))
+
+    def test_one_dimensional_indexing_returns_locset_mask(self) -> None:
+        mask = LocsetMask(
+            points=((0, 0.1), (1, 0.2), (2, 0.3)),
+            display_names=("a", "b", "c"),
+        )
+
+        self.assertEqual(mask[1].points, ((1, 0.2),))
+        self.assertEqual(mask[[2, 0, 2]].points, ((2, 0.3), (0, 0.1), (2, 0.3)))
+        self.assertEqual(mask[np.asarray([True, False, True])].display_names, ("a", "c"))
+
+    def test_two_dimensional_indexing_returns_locset_batch(self) -> None:
+        mask = LocsetMask(
+            points=((0, 0.1), (1, 0.2), (2, 0.3)),
+            display_names=("a", "b", "c"),
+        )
+
+        batch = mask[np.asarray([[0, 1], [2, 0], [1, 1]])]
+
+        self.assertIsInstance(batch, LocsetBatch)
+        self.assertEqual(batch.shape, (3, 2))
+        self.assertEqual(batch[0].points, ((0, 0.1), (1, 0.2)))
+        self.assertEqual(batch[1:].shape, (2, 2))
+        self.assertEqual(batch.display_names, (("a", "b"), ("c", "a"), ("b", "b")))
+
+
+class LocsetBatchTest(unittest.TestCase):
+    def test_column_constructor_copies_freezes_and_validates_storage(self) -> None:
+        branch_id = np.asarray([[0, 1], [2, 0]], dtype=np.int32)
+        branch_x = np.asarray([[0.1, 0.2], [0.3, 0.1]], dtype=np.float32)
+
+        batch = LocsetBatch.from_columns(branch_id, branch_x, (("a", "b"), ("c", "a")))
+        branch_id[0, 0] = 99
+        branch_x[0, 0] = 0.9
+
+        np.testing.assert_array_equal(batch.branch_id, np.asarray([[0, 1], [2, 0]]))
+        np.testing.assert_allclose(batch.branch_x, np.asarray([[0.1, 0.2], [0.3, 0.1]]), atol=1e-7)
+        self.assertFalse(batch.branch_id.flags.writeable)
+        self.assertFalse(batch.branch_x.flags.writeable)
+        with self.assertRaises(ValueError):
+            LocsetBatch.from_columns([0, 1], [0.1, 0.2])
+        with self.assertRaises(ValueError):
+            LocsetBatch.from_columns([[0, 1]], [[0.1]])
+        with self.assertRaises(ValueError):
+            LocsetBatch.from_columns([[0]], [[1.1]])
+
+
+class ForkPointsTest(unittest.TestCase):
+    def test_multiple_forks_keep_first_attachment_order(self) -> None:
+        tree = Morphology.from_root(_branch(branch_type="soma"), name="soma")
+        tree.soma.attach(_branch(), name="middle_a", parent_x=0.5)
+        tree.soma.attach(_branch(), name="distal_a", parent_x=1.0)
+        tree.soma.attach(_branch(), name="middle_b", parent_x=0.5)
+        tree.soma.attach(_branch(), name="distal_b", parent_x=1.0)
+
+        self.assertEqual(ForkPoints().evaluate(tree).points, ((0, 0.5), (0, 1.0)))
+
+    def test_transitive_attachment_equivalence_forms_one_fork(self) -> None:
+        tree = Morphology.from_root(_branch(branch_type="soma"), name="soma")
+        tree.soma.attach(_branch(), name="a", parent_x=1.0, child_x=0.0)
+        tree.soma.a.attach(_branch(), name="b", parent_x=0.0, child_x=0.0)
+
+        self.assertEqual(ForkPoints().evaluate(tree).points, ((0, 1.0),))
+
+    def test_single_soma_midpoint_child_is_not_a_fork(self) -> None:
+        tree = Morphology.from_root(_branch(branch_type="soma"), name="soma")
+        tree.soma.attach(_branch(), name="dend", parent_x=0.5)
+
+        self.assertEqual(ForkPoints().evaluate(tree).points, ())
+
+    def test_coincident_geometry_does_not_create_topology_fork(self) -> None:
+        soma = Branch.from_points(
+            points=np.asarray([[0, 0, 0], [10, 0, 0], [0, 0, 0]]) * u.um,
+            radii=[2.0, 2.0, 2.0] * u.um,
+            type="soma",
+        )
+        child = Branch.from_points(
+            points=np.asarray([[0, 0, 0], [0, 10, 0]]) * u.um,
+            radii=[1.0, 1.0] * u.um,
+            type="dendrite",
+        )
+        tree = Morphology.from_root(soma, name="soma")
+        tree.soma.attach(child, name="left", parent_x=0.0)
+        tree.soma.attach(child, name="right", parent_x=1.0)
+
+        self.assertEqual(ForkPoints().evaluate(tree).points, ())
+
+
+class RegionSamplingLocsetTest(unittest.TestCase):
+    def test_uniform_samples_are_globally_length_uniform(self) -> None:
+        tree = _build_sampling_tree()
+        region = BranchSlice(branch_index=[0, 1], prox=0.0, dist=1.0)
+
+        locset = UniformSamples(region=region, count=4).evaluate(tree)
+
+        self.assertEqual(len(locset.points), 4)
+        self.assertEqual(locset.points[0], (0, 0.5))
+        self.assertAlmostEqual(locset.points[1][1], 1.0 / 6.0, places=12)
+        self.assertAlmostEqual(locset.points[2][1], 0.5, places=12)
+        self.assertAlmostEqual(locset.points[3][1], 5.0 / 6.0, places=12)
+
+    def test_random_samples_use_seed_and_stay_in_region(self) -> None:
+        tree = _build_sampling_tree()
+        region = BranchSlice(branch_index=[0, 1], prox=0.0, dist=1.0)
+        intervals = region.evaluate(tree).intervals
+
+        first = RandomSamples(region=region, count=30, seed=123).evaluate(tree)
+        second = RandomSamples(region=region, count=30, seed=123).evaluate(tree)
+        third = RandomSamples(region=region, count=30, seed=124).evaluate(tree)
+
+        self.assertEqual(first.points, second.points)
+        self.assertNotEqual(first.points, third.points)
+        for point in first.points:
+            self.assertTrue(_point_is_in_region(point, intervals))
+
+    def test_sampling_rejects_invalid_parameters(self) -> None:
+        tree = _build_sampling_tree()
+        region = BranchSlice(branch_index=0, prox=0.0, dist=1.0)
+
+        with self.assertRaises(ValueError):
+            UniformSamples(region=region, count=0).evaluate(tree)
+        with self.assertRaises(TypeError):
+            UniformSamples(region=RootLocation(x=0.5), count=1).evaluate(tree)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            RandomSamples(region=region, count=1, seed="bad").evaluate(tree)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            UniformSamples(region=EmptyRegion(), count=1).evaluate(tree)
+        with self.assertRaises(ValueError):
+            RandomSamples(region=EmptyRegion(), count=1, seed=1).evaluate(tree)
+
+
+class LocsetSetOpValidationTest(unittest.TestCase):
+    def test_invalid_operator_and_arity_raise(self) -> None:
+        tree = _build_sampling_tree()
+        left = RootLocation(x=0.2)
+        right = RootLocation(x=0.8)
+
+        with self.assertRaises(ValueError):
+            LocsetSetOp("invalid", (left, right)).evaluate(tree)
+        with self.assertRaises(ValueError):
+            LocsetSetOp("union", (left,)).evaluate(tree)
+        with self.assertRaises(ValueError):
+            LocsetConcatOp((left,)).evaluate(tree)
+
+    def test_unique_expression_type_is_public(self) -> None:
+        self.assertIsInstance(RootLocation(x=0.5).unique(), LocsetUniqueOp)
+
+
+class LocsetModuleAllTest(unittest.TestCase):
+    def test_locset_module_declares_all(self) -> None:
+        self.assertIn("LocsetMask", locset_mod.__all__)
+        self.assertIn("LocsetExpr", locset_mod.__all__)
+        self.assertIn("AtLocation", locset_mod.__all__)
+        self.assertIn("RootLocation", locset_mod.__all__)
+        self.assertIn("RandomSamples", locset_mod.__all__)
+        self.assertIn("LocsetSetOp", locset_mod.__all__)
+        self.assertIn("StepSamples", locset_mod.__all__)
+        self.assertIn("at", locset_mod.__all__)

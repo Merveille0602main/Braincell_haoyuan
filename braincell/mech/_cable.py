@@ -28,6 +28,8 @@ from typing import Any
 import brainunit as u
 import numpy as np
 
+from ._params import quantity_hashable
+
 __all__ = ["CableProperty"]
 
 
@@ -35,21 +37,25 @@ def _default_temperature() -> Any:
     return u.celsius2kelvin(36.0)
 
 
+@quantity_hashable
 @dataclass(frozen=True)
 class CableProperty:
     """Passive cable properties of a region.
 
     Parameters
     ----------
-    resting_potential : Quantity[mV]
+    resting_potential : Quantity[mV] or callable
         Reference voltage used as the default voltage initializer.
-    membrane_capacitance : Quantity[uF / cm**2]
+        A callable receives the per-CV :class:`braincell.mech.CVContext`.
+    membrane_capacitance : Quantity[uF / cm**2] or callable
         Specific membrane capacitance.
-    axial_resistivity : Quantity[ohm * cm]
+    axial_resistivity : Quantity[ohm * cm] or callable
         Cytoplasmic axial resistivity.
-    temperature : Quantity[kelvin]
+    temperature : Quantity[kelvin] or callable
         Absolute temperature used for Q10 scaling in channel kinetics.
         Defaults to 36 °C (309.15 K).
+        A callable is evaluated later with the per-CV
+        :class:`braincell.mech.CVContext`.
 
     Raises
     ------
@@ -101,17 +107,11 @@ class CableProperty:
 
 
 def _coerce_temperature(value: Any, *, name: str) -> Any:
-    if not hasattr(value, "to_decimal") or not callable(
-        getattr(value, "to_decimal")
-    ):
-        raise TypeError(
-            f"CableProperty.{name} must be a temperature Quantity, "
-            f"got {value!r}."
-        )
+    if callable(value):
+        return value
+    if not hasattr(value, "to_decimal") or not callable(getattr(value, "to_decimal")):
+        raise TypeError(f"CableProperty.{name} must be a temperature Quantity, got {value!r}.")
     decimal = np.asarray(value.to_decimal(u.kelvin), dtype=float)
     if decimal.ndim != 0:
-        raise TypeError(
-            f"CableProperty.{name} must be a scalar temperature "
-            f"Quantity, got shape {decimal.shape!r}."
-        )
+        raise TypeError(f"CableProperty.{name} must be a scalar temperature Quantity, got shape {decimal.shape!r}.")
     return u.Quantity(float(decimal), u.kelvin)

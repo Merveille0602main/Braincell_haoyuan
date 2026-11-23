@@ -35,7 +35,6 @@ def _noop(target, *args, **kwargs):  # pragma: no cover - body irrelevant
 
 
 class IntegratorRegistryTest(unittest.TestCase):
-
     def setUp(self):
         self.registry = IntegratorRegistry()
 
@@ -142,9 +141,7 @@ class IntegratorRegistryTest(unittest.TestCase):
             warnings.simplefilter("always")
             _ = self.registry["foo"]
             _ = self.registry["foo"]
-        deprecation_warnings = [
-            w for w in caught if issubclass(w.category, DeprecationWarning)
-        ]
+        deprecation_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
         self.assertEqual(len(deprecation_warnings), 1)
 
     def test_suggest_close_match(self):
@@ -174,9 +171,7 @@ class IntegratorRegistryTest(unittest.TestCase):
     def test_names_with_and_without_aliases(self):
         self.registry.register("foo", _noop, aliases=("bar",))
         self.assertEqual(self.registry.names(), ["foo"])
-        self.assertEqual(
-            self.registry.names(include_aliases=True), ["bar", "foo"]
-        )
+        self.assertEqual(self.registry.names(include_aliases=True), ["bar", "foo"])
 
 
 class GlobalRegistryIntegrationTest(unittest.TestCase):
@@ -326,8 +321,11 @@ class RegistryMetadataTest(unittest.TestCase):
                 entry = registry.entry(name)
                 self.assertEqual(entry.category, category)
                 self.assertEqual(entry.order, order)
-                # The module field should point at a braincell.quad submodule.
-                self.assertTrue(entry.module.startswith("braincell.quad."))
+                # ``module`` is the *public* path the integrator is exported
+                # from, not the private submodule it happens to be defined
+                # in — ``register_integrator`` is applied outside
+                # ``set_module_as`` precisely so this records the former.
+                self.assertEqual(entry.module, "braincell.quad")
 
     def test_by_category_groups(self):
         registry = quad.get_registry()
@@ -348,6 +346,7 @@ class GlobalRegisterIntegratorDecoratorTest(unittest.TestCase):
         from braincell.quad import register_integrator
 
         with self.assertRaises(ValueError):
+
             @register_integrator("euler")
             def _stub(target, *args):
                 return None

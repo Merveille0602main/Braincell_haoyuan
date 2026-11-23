@@ -31,9 +31,79 @@ a leak channel). Its two load-bearing properties are:
 """
 
 from collections.abc import Iterator, Mapping
+from dataclasses import fields, is_dataclass
 from typing import Any
 
-__all__ = ["Params"]
+import brainunit as u
+import numpy as np
+
+__all__ = ["Params", "quantity_hashable"]
+
+
+def _to_hashable(value: object) -> object:
+    """Convert ``value`` into a deterministic, hashable equivalent.
+
+    Used by :class:`Params` (and the runtime layout-dedup signatures)
+    because :class:`brainunit.Quantity` is not hashable on recent
+    ``saiunit`` releases (``Quantity.__hash__`` is set to ``None``).
+    Unwrap Quantity values into ``(payload, unit_str)`` tuples and
+    recurse through tuples, lists, dicts and dataclasses so that
+    equally-valued inputs still produce identical keys.
+
+    Concrete arrays are normalized by dtype, shape, and values so mechanism
+    declarations can carry heterogeneous parameters while remaining usable in
+    declaration cache keys.
+    """
+    if isinstance(value, u.Quantity):
+        mantissa = value.mantissa
+        if hasattr(mantissa, "shape") and getattr(mantissa, "shape", ()) != ():
+            try:
+                payload = tuple(np.asarray(mantissa).reshape(-1).tolist())
+            except Exception:
+                payload = id(mantissa)
+        else:
+            payload = float(np.asarray(mantissa))
+        return ("__Q__", payload, str(value.unit))
+    if isinstance(value, tuple):
+        return tuple(_to_hashable(v) for v in value)
+    if isinstance(value, list):
+        return ("__list__",) + tuple(_to_hashable(v) for v in value)
+    if isinstance(value, dict):
+        return ("__dict__",) + tuple((k, _to_hashable(v)) for k, v in sorted(value.items(), key=lambda kv: kv[0]))
+    if isinstance(value, np.ndarray):
+        return ("__array__", str(value.dtype), value.shape, tuple(value.reshape(-1).tolist()))
+    if hasattr(value, "shape") and hasattr(value, "dtype"):
+        try:
+            array = np.asarray(value)
+        except Exception:
+            return ("__opaque_array__", id(value))
+        return ("__array__", str(array.dtype), array.shape, tuple(array.reshape(-1).tolist()))
+    if is_dataclass(value) and not isinstance(value, type):
+        return (
+            type(value).__qualname__,
+            tuple(_to_hashable(getattr(value, f.name)) for f in fields(value)),
+        )
+    return value
+
+
+def _quantity_aware_hash(self: object) -> int:
+    return hash(_to_hashable(self))
+
+
+def quantity_hashable(cls: type) -> type:
+    """Class decorator: install a ``__hash__`` that handles Quantity fields.
+
+    Stack **after** ``@dataclass(frozen=True)``. Replaces the auto-generated
+    ``__hash__`` (which calls ``hash(self.field_tuple)`` and so trips on
+    unhashable :class:`brainunit.Quantity` fields) with one that routes
+    through :func:`_to_hashable`. Equal-valued instances continue to hash
+    equal; structural equality (``__eq__``) is left untouched.
+
+    Use on every frozen dataclass that may carry Quantity fields directly,
+    or that contains other dataclasses which do.
+    """
+    cls.__hash__ = _quantity_aware_hash  # type: ignore[assignment]
+    return cls
 
 
 class Params(Mapping[str, Any]):
@@ -92,27 +162,22 @@ class Params(Mapping[str, Any]):
                 iterator = iter(data)  # type: ignore[arg-type]
             except TypeError as exc:
                 raise TypeError(
-                    f"Params() expected a Mapping or iterable of "
-                    f"(name, value) pairs, got {type(data).__name__!r}."
+                    f"Params() expected a Mapping or iterable of (name, value) pairs, got {type(data).__name__!r}."
                 ) from exc
             for pair in iterator:
                 try:
                     key, value = pair
                 except (TypeError, ValueError) as exc:
-                    raise TypeError(
-                        f"Params() entries must be (name, value) pairs, "
-                        f"got {pair!r}."
-                    ) from exc
+                    raise TypeError(f"Params() entries must be (name, value) pairs, got {pair!r}.") from exc
                 merged[str(key)] = value
         for key, value in kwargs.items():
             merged[str(key)] = value
         for key, value in merged.items():
             try:
-                hash(value)
+                hash(_to_hashable(value))
             except TypeError as exc:
                 raise TypeError(
-                    f"Params value for {key!r} must be hashable "
-                    f"(arrays are rejected); got {type(value).__name__!r}."
+                    f"Params value for {key!r} must be hashable or a concrete array; got {type(value).__name__!r}."
                 ) from exc
         object.__setattr__(self, "_items", merged)
 
@@ -152,14 +217,10 @@ class Params(Mapping[str, Any]):
     # ------------------------------------------------------------------
 
     def __setattr__(self, name: str, value: Any) -> None:
-        raise AttributeError(
-            f"Params is immutable; cannot set attribute {name!r}."
-        )
+        raise AttributeError(f"Params is immutable; cannot set attribute {name!r}.")
 
     def __delattr__(self, name: str) -> None:
-        raise AttributeError(
-            f"Params is immutable; cannot delete attribute {name!r}."
-        )
+        raise AttributeError(f"Params is immutable; cannot delete attribute {name!r}.")
 
     # ------------------------------------------------------------------
     # equality / hashing: order-insensitive (dict-like)
@@ -167,9 +228,13 @@ class Params(Mapping[str, Any]):
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Params):
-            return self._items == other._items
+            return {key: _to_hashable(value) for key, value in self._items.items()} == {
+                key: _to_hashable(value) for key, value in other._items.items()
+            }
         if isinstance(other, Mapping):
-            return dict(self._items) == dict(other)
+            return {key: _to_hashable(value) for key, value in self._items.items()} == {
+                key: _to_hashable(value) for key, value in other.items()
+            }
         return NotImplemented
 
     def __ne__(self, other: object) -> bool:
@@ -180,11 +245,10 @@ class Params(Mapping[str, Any]):
 
     def __hash__(self) -> int:
         try:
-            return hash(frozenset(self._items.items()))
+            return hash(frozenset((k, _to_hashable(v)) for k, v in self._items.items()))
         except TypeError as exc:
             raise TypeError(
-                f"Params values must be hashable to hash the mapping; "
-                f"unhashable entry encountered ({exc})."
+                f"Params values must be hashable to hash the mapping; unhashable entry encountered ({exc})."
             ) from exc
 
     # ------------------------------------------------------------------
@@ -239,11 +303,7 @@ class Params(Mapping[str, Any]):
         if not keys:
             return self
         to_drop = {str(k) for k in keys}
-        remaining = {
-            key: value
-            for key, value in self._items.items()
-            if key not in to_drop
-        }
+        remaining = {key: value for key, value in self._items.items() if key not in to_drop}
         return Params(remaining)
 
     # ------------------------------------------------------------------

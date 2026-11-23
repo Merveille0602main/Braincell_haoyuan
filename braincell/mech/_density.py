@@ -40,7 +40,8 @@ via :func:`braincell.mech.get_registry().get(category, class_name)
 <braincell.mech.MechanismRegistry.get>`.
 """
 
-from typing import Any, ClassVar, Mapping
+import operator
+from typing import Any, Callable, ClassVar, Mapping
 
 from ._base import Mechanism
 from ._params import Params
@@ -85,6 +86,12 @@ class Density(Mechanism):
         area covered by this declaration. Set by the control-volume
         lowering pipeline (:mod:`braincell.cv._lower`) when a paint
         region only partially overlaps a CV. Defaults to ``1.0``.
+    solver : str or Callable or None
+        Optional declaration-local integrator override. It is applied only
+        to Markov channels and kinetic ions and must be supplied together
+        with ``substeps``. ``None`` inherits the enclosing Cell schedule.
+    substeps : int or None
+        Optional declaration-local substep count, paired with ``solver``.
 
     Raises
     ------
@@ -103,7 +110,14 @@ class Density(Mechanism):
     Ion : Concrete subclass for ion species.
     """
 
-    __slots__ = ("class_name", "params", "name", "coverage_area_fraction")
+    __slots__ = (
+        "class_name",
+        "params",
+        "name",
+        "coverage_area_fraction",
+        "solver",
+        "substeps",
+    )
 
     #: Category discriminator, set by concrete subclasses to ``"channel"``
     #: or ``"ion"``. Instances of the abstract base have an empty string.
@@ -117,45 +131,39 @@ class Density(Mechanism):
         params: Any = None,
         name: str | None = None,
         coverage_area_fraction: float = 1.0,
+        solver: str | Callable | None = None,
+        substeps: int | None = None,
     ) -> None:
         cls = type(self)
         if cls is Density or not cls.category:
-            raise TypeError(
-                f"{cls.__name__} is an abstract base; instantiate "
-                f"Channel or Ion instead."
-            )
+            raise TypeError(f"{cls.__name__} is an abstract base; instantiate Channel or Ion instead.")
         resolved = _resolve_class_name(cls.category, class_name)
         if name is not None and not isinstance(name, str):
-            raise TypeError(
-                f"{cls.__name__}.name must be a string or None, "
-                f"got {type(name).__name__!r}."
-            )
+            raise TypeError(f"{cls.__name__}.name must be a string or None, got {type(name).__name__!r}.")
         coverage = float(coverage_area_fraction)
         if not (0.0 <= coverage <= 1.0):
-            raise ValueError(
-                f"{cls.__name__}.coverage_area_fraction must lie in "
-                f"[0, 1], got {coverage!r}."
-            )
+            raise ValueError(f"{cls.__name__}.coverage_area_fraction must lie in [0, 1], got {coverage!r}.")
+        solver, substeps = _normalize_integration_override(
+            solver,
+            substeps,
+            owner=cls.__name__,
+        )
         object.__setattr__(self, "class_name", resolved)
         object.__setattr__(self, "params", Params.coerce(params))
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "coverage_area_fraction", coverage)
+        object.__setattr__(self, "solver", solver)
+        object.__setattr__(self, "substeps", substeps)
 
     # ------------------------------------------------------------------
     # immutability
     # ------------------------------------------------------------------
 
     def __setattr__(self, name: str, value: Any) -> None:
-        raise AttributeError(
-            f"{type(self).__name__} is immutable; cannot set "
-            f"attribute {name!r}."
-        )
+        raise AttributeError(f"{type(self).__name__} is immutable; cannot set attribute {name!r}.")
 
     def __delattr__(self, name: str) -> None:
-        raise AttributeError(
-            f"{type(self).__name__} is immutable; cannot delete "
-            f"attribute {name!r}."
-        )
+        raise AttributeError(f"{type(self).__name__} is immutable; cannot delete attribute {name!r}.")
 
     # ------------------------------------------------------------------
     # accessors
@@ -186,6 +194,8 @@ class Density(Mechanism):
             and self.params == other.params
             and self.name == other.name
             and self.coverage_area_fraction == other.coverage_area_fraction
+            and self.solver == other.solver
+            and self.substeps == other.substeps
         )
 
     def __ne__(self, other: object) -> bool:
@@ -202,6 +212,8 @@ class Density(Mechanism):
                 self.params,
                 self.name,
                 self.coverage_area_fraction,
+                self.solver,
+                self.substeps,
             )
         )
 
@@ -211,7 +223,9 @@ class Density(Mechanism):
             f"class_name={self.class_name!r}, "
             f"params={self.params!r}, "
             f"name={self.name!r}, "
-            f"coverage_area_fraction={self.coverage_area_fraction!r})"
+            f"coverage_area_fraction={self.coverage_area_fraction!r}, "
+            f"solver={self.solver!r}, "
+            f"substeps={self.substeps!r})"
         )
 
     # ------------------------------------------------------------------
@@ -254,6 +268,25 @@ class Density(Mechanism):
         """Return a copy with a new instance label."""
         return self._replace(name=name)
 
+    def with_integration(
+        self,
+        *,
+        solver: str | Callable | None = None,
+        substeps: int | None = None,
+    ) -> "Density":
+        """Return a copy with a declaration-local integration override.
+
+        ``solver`` and ``substeps`` form one atomic override. Passing both
+        as ``None`` clears the override so the declaration inherits the
+        enclosing :class:`braincell.Cell` configuration.
+        """
+        solver, substeps = _normalize_integration_override(
+            solver,
+            substeps,
+            owner=type(self).__name__,
+        )
+        return self._replace(solver=solver, substeps=substeps)
+
     # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
@@ -267,17 +300,15 @@ class Density(Mechanism):
         """
         new = object.__new__(type(self))
         object.__setattr__(new, "class_name", updates.get("class_name", self.class_name))
-        object.__setattr__(
-            new, "params", Params.coerce(updates.get("params", self.params))
-        )
+        object.__setattr__(new, "params", Params.coerce(updates.get("params", self.params)))
         object.__setattr__(new, "name", updates.get("name", self.name))
         object.__setattr__(
             new,
             "coverage_area_fraction",
-            float(
-                updates.get("coverage_area_fraction", self.coverage_area_fraction)
-            ),
+            float(updates.get("coverage_area_fraction", self.coverage_area_fraction)),
         )
+        object.__setattr__(new, "solver", updates.get("solver", self.solver))
+        object.__setattr__(new, "substeps", updates.get("substeps", self.substeps))
         return new
 
 
@@ -297,10 +328,17 @@ class Channel(Density):
         Fraction in ``[0, 1]`` of the target CV's lateral area this
         declaration covers. Callers rarely set this directly — it is
         typically computed by the paint lowering pass.
+    solver : str or Callable or None
+        Optional Markov integration override. Must be paired with
+        ``substeps``; ``None`` inherits the enclosing Cell schedule.
+    substeps : int or None
+        Optional Markov substep count, paired with ``solver``.
     **params
         Channel parameters, passed as keyword arguments with
         ``brainunit`` quantity values (e.g. ``g_max=0.1 * u.mS /
-        u.cm ** 2``, ``E=-70 * u.mV``).
+        u.cm ** 2``, ``E=-70 * u.mV``). A parameter may also be a
+        callable accepting one :class:`braincell.mech.CVContext`; it is
+        resolved once per active CV during ``Cell.init_state()``.
 
     See Also
     --------
@@ -338,6 +376,8 @@ class Channel(Density):
         coverage_area_fraction: float = 1.0,
         ion_name: str | None = None,
         ion_names: Mapping[str, str] | None = None,
+        solver: str | Callable | None = None,
+        substeps: int | None = None,
         **params: Any,
     ) -> None:
         super().__init__(
@@ -345,11 +385,11 @@ class Channel(Density):
             params=Params(params) if params else None,
             name=name,
             coverage_area_fraction=coverage_area_fraction,
+            solver=solver,
+            substeps=substeps,
         )
         if ion_name is not None and (not isinstance(ion_name, str) or not ion_name):
-            raise TypeError(
-                f"Channel.ion_name must be a non-empty string or None, got {ion_name!r}."
-            )
+            raise TypeError(f"Channel.ion_name must be a non-empty string or None, got {ion_name!r}.")
         normalized_ion_names = _normalize_ion_names(ion_names)
         if ion_name is not None and normalized_ion_names is not None:
             raise ValueError("Channel cannot define both ion_name and ion_names.")
@@ -399,8 +439,15 @@ class Ion(Density):
     coverage_area_fraction : float
         Fraction in ``[0, 1]`` of the target CV's lateral area this
         declaration covers.
+    solver : str or Callable or None
+        Optional kinetic-ion integration override. Must be paired with
+        ``substeps``; ``None`` inherits the enclosing Cell schedule.
+    substeps : int or None
+        Optional kinetic-ion substep count, paired with ``solver``.
     **params
-        Ion parameters, passed as keyword arguments.
+        Ion parameters, passed as keyword arguments. A parameter may also
+        be a callable accepting one :class:`braincell.mech.CVContext`; it is
+        resolved once per active CV during ``Cell.init_state()``.
 
     See Also
     --------
@@ -435,6 +482,8 @@ class Ion(Density):
         *,
         name: str | None = None,
         coverage_area_fraction: float = 1.0,
+        solver: str | Callable | None = None,
+        substeps: int | None = None,
         **params: Any,
     ) -> None:
         super().__init__(
@@ -442,12 +491,43 @@ class Ion(Density):
             params=Params(params) if params else None,
             name=name,
             coverage_area_fraction=coverage_area_fraction,
+            solver=solver,
+            substeps=substeps,
         )
 
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _normalize_integration_override(
+    solver: str | Callable | None,
+    substeps: int | None,
+    *,
+    owner: str,
+) -> tuple[str | Callable | None, int | None]:
+    if (solver is None) != (substeps is None):
+        raise ValueError(f"{owner}.solver and {owner}.substeps must be provided together or both be None.")
+    if solver is None:
+        return None, None
+    if not isinstance(solver, str) and not callable(solver):
+        raise TypeError(f"{owner}.solver must be a non-empty string, callable, or None, got {type(solver).__name__!r}.")
+    if isinstance(solver, str) and not solver:
+        raise ValueError(f"{owner}.solver must be a non-empty string.")
+    try:
+        hash(solver)
+    except TypeError as exc:
+        raise TypeError(f"{owner}.solver callable must be hashable.") from exc
+    if isinstance(substeps, bool):
+        raise TypeError(f"{owner}.substeps must be an integer, got bool.")
+    try:
+        normalized_substeps = operator.index(substeps)
+    except TypeError as exc:
+        raise TypeError(f"{owner}.substeps must be an integer, got {type(substeps).__name__!r}.") from exc
+    if normalized_substeps < 1:
+        raise ValueError(f"{owner}.substeps must be at least 1, got {normalized_substeps!r}.")
+    return solver, normalized_substeps
 
 
 def _resolve_class_name(category: str, value: Any) -> str:
@@ -462,9 +542,7 @@ def _resolve_class_name(category: str, value: Any) -> str:
     """
     if isinstance(value, str):
         if not value:
-            raise ValueError(
-                "class_name must be a non-empty string."
-            )
+            raise ValueError("class_name must be a non-empty string.")
         return value
     if isinstance(value, type):
         # Local import to avoid a hard import cycle between _density
@@ -476,10 +554,7 @@ def _resolve_class_name(category: str, value: Any) -> str:
             if entry_cls is value:
                 return entry_name
         return value.__name__
-    raise TypeError(
-        f"class_name must be a string or class, got "
-        f"{type(value).__name__!r}."
-    )
+    raise TypeError(f"class_name must be a string or class, got {type(value).__name__!r}.")
 
 
 def _normalize_ion_names(value: Mapping[str, str] | None) -> tuple[tuple[str, str], ...] | None:

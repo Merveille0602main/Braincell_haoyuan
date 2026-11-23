@@ -88,9 +88,7 @@ def _to_shape(
         if all(d == 1 for d in extra_dims):
             array = array.reshape(array.shape[n_actual_dims - n_expected_dims :])
         else:
-            raise ValueError(
-                f"{name}: expected {n_expected_dims}D, got {n_actual_dims}D with shape {array.shape}"
-            )
+            raise ValueError(f"{name}: expected {n_expected_dims}D, got {n_actual_dims}D with shape {array.shape}")
 
     for i, (expected, actual) in enumerate(zip(shape, array.shape)):
         if expected is not None and expected != actual:
@@ -194,31 +192,51 @@ def deprecation_getattr(module, deprecations):
 
 
 def set_module_as(name: str):
+    """Return a decorator that re-homes a function onto a public module path.
+
+    BrainCell defines its public functions inside underscore-prefixed
+    private modules and re-exports them from a public package, so a
+    function's ``__module__`` points at the path users are not supposed to
+    import from. Applying this decorator restores the public path, which
+    is what :mod:`sphinx`, :func:`help`, :func:`repr`, and pickling all
+    read.
+
+    Parameters
+    ----------
+    name : str
+        Public module path to advertise, such as ``'braincell'`` or
+        ``'braincell.quad'``.
+
+    Returns
+    -------
+    Callable
+        A decorator that sets ``__module__`` on its argument and returns
+        it unchanged.
+
+    Notes
+    -----
+    Only ``__module__`` is touched. An earlier version assigned ``name``
+    to ``__name__`` instead, which left every decorated function claiming
+    to be called ``"braincell.quad"``; ``__name__`` is the function's own
+    name and is deliberately left alone.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> from braincell._misc import set_module_as
+        >>> @set_module_as('braincell.quad')
+        ... def euler_step():
+        ...     pass
+        >>> euler_step.__module__
+        'braincell.quad'
+        >>> euler_step.__name__
+        'euler_step'
     """
-    A decorator factory to set the `__name__` attribute of a module.
 
-    This function returns a decorator that, when applied to a module,
-    sets the module's `__name__` attribute to the specified name.
-
-    Args:
-        name (str): The new name to assign to the module's `__name__` attribute.
-
-    Returns:
-        Callable: A decorator that modifies the `__name__` attribute of the module.
-    """
-
-    def decorator(module):
-        """
-        Decorator to set the `__name__` attribute of the given module.
-
-        Args:
-            module: The module whose `__name__` attribute will be modified.
-
-        Returns:
-            The modified module with its `__name__` attribute updated.
-        """
-        module.__name__ = name
-        return module
+    def decorator(fun):
+        fun.__module__ = name
+        return fun
 
     return decorator
 
@@ -279,6 +297,7 @@ class Container(brainstate.mixin.Mixin):
         Subclasses should implement the `add_elem` method to define how new elements
         are added to the container.
     """
+
     __module__ = 'braincell'
 
     _container_name: str
@@ -308,12 +327,12 @@ class Container(brainstate.mixin.Mixin):
         # add dict-typed components
         for k, v in children_as_dict.items():
             if not isinstance(v, child_type):
-                raise TypeError(f'Should be instance of {child_type.__name__}. '
-                                f'But we got {type(v)}')
+                raise TypeError(f'Should be instance of {child_type.__name__}. But we got {type(v)}')
             res[k] = v
         return res
 
     if not TYPE_CHECKING:
+
         def __getitem__(self, item):
             """
             Overwrite the slice access (`self['']`).
@@ -376,6 +395,7 @@ class TreeNode(brainstate.mixin.Mixin):
         Subclasses should define the `root_type` attribute to specify the expected
         type of their root node.
     """
+
     __module__ = 'braincell'
 
     root_type: type
@@ -396,12 +416,16 @@ class TreeNode(brainstate.mixin.Mixin):
         if hasattr(leaf, 'root_type'):
             root_type = leaf.root_type
         else:
-            raise ValueError('Child class should define "root_type" to '
-                             'specify the type of the root node. '
-                             f'But we did not found it in {leaf}')
+            raise ValueError(
+                'Child class should define "root_type" to '
+                'specify the type of the root node. '
+                f'But we did not found it in {leaf}'
+            )
         if not issubclass(root, root_type):
-            raise TypeError(f'Type does not match. {leaf} requires a root with type '
-                            f'of {leaf.root_type}, but the root now is {root}.')
+            raise TypeError(
+                f'Type does not match. {leaf} requires a root with type '
+                f'of {leaf.root_type}, but the root now is {root}.'
+            )
 
     @staticmethod
     def check_hierarchies(root: type, *leaves, check_fun: Callable = None, **named_leaves):

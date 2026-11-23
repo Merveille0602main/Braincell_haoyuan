@@ -83,30 +83,50 @@ may be defined in other files within the BrainCell library.
 
 from typing import Optional, Dict, Sequence, Callable, NamedTuple, Tuple, Type, Hashable
 
-import brainstate
 import brainpy
 import brainunit as u
 import jax.numpy as jnp
 import numpy as np
 from brainstate.mixin import _JointGenericAlias
 
+from braincell._typing import Size
 from .quad.protocol import DiffEqModule, IndependentIntegration
 from ._misc import cast_like as _cast_like, set_module_as, Container, TreeNode
 
 
 __all__ = [
     'HHTypedNeuron',
-
     'IonChannel',
-
     'Ion',
     'MixIons',
     'Channel',
     'Synapse',
-
     'mix_ions',
     'IonInfo',
 ]
+
+
+def _zero_spike_like(V):
+    """Return a zero spike buffer matching a membrane-voltage value.
+
+    Parameters
+    ----------
+    V : array-like or Quantity
+        Membrane voltage value whose shape should be mirrored.
+
+    Returns
+    -------
+    array-like
+        Unitless zero-valued spike buffer with the same shape as ``V``.
+
+    Notes
+    -----
+    ``init_state`` and ``reset_state`` seed ``last_V`` and ``next_V`` with
+    the same value, so no threshold crossing can occur.  Building the zero
+    buffer directly avoids tracing the surrogate spike function during these
+    lifecycle phases.
+    """
+    return u.math.zeros_like(u.get_magnitude(V))
 
 
 class HHTypedNeuron(brainpy.state.Dynamics, Container, DiffEqModule):
@@ -134,15 +154,11 @@ class HHTypedNeuron(brainpy.state.Dynamics, Container, DiffEqModule):
     AssertionError
         If the size is less than 1-dimensional.
     """
+
     __module__ = 'braincell'
     _container_name = 'ion_channels'
 
-    def __init__(
-        self,
-        size: brainstate.typing.Size,
-        name: Optional[str] = None,
-        **ion_channels
-    ):
+    def __init__(self, size: Size, name: Optional[str] = None, **ion_channels):
         super().__init__(size, name=name)
 
         # attribute for ``Container``
@@ -412,10 +428,8 @@ class HHTypedNeuron(brainpy.state.Dynamics, Container, DiffEqModule):
         """
         denom = _cast_like(20.0 * u.mV, next_V)
         V_th = _cast_like(self.V_th, next_V)
-        return (
-            self.spk_fun((next_V - V_th) / denom)
-            * self.spk_fun((V_th - last_V) / denom)
-        )
+        return self.spk_fun((next_V - V_th) / denom) * self.spk_fun((V_th - last_V) / denom)
+
 
 # ---------------------------------------------------------------------------
 # Re-exports (ARCH-03). The ion-channel family lives in

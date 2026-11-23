@@ -13,57 +13,68 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Gap-junction declarations.
+"""Point declarations for bidirectional electrical connections."""
 
-:class:`Junction` is the declaration-layer record for a gap-junction
-coupling. It is a point mechanism — it attaches to a specific location
-on a cell rather than being distributed over a region — but it differs
-enough from the stimulus / probe / synapse declarations in
-:mod:`braincell.mech._point` that it lives in its own module.
-
-The current implementation is a placeholder: it only records a
-parameter bundle. A future revision should add a ``partner`` locset /
-cell handle so multi-cell gap junctions can be expressed end-to-end.
-"""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from numbers import Integral
 
-from ._params import Params
-from ._point import Point
+from braincell.mech._params import Params
+from braincell.mech._point import Point
 
-__all__ = ["Junction"]
+__all__ = ["Junction", "JunctionEndpoint"]
+
+
+@dataclass(frozen=True, eq=False)
+class JunctionEndpoint:
+    """Select ordered morphology locations on members of a Cell population.
+
+    Parameters
+    ----------
+    cell : Cell
+        Cell registered in a Network.
+    locations : LocsetExpr or LocsetMask
+        One morphology location per contact row in order.
+    population_indices : int or sequence of int, optional
+        Population member per row. A scalar applies to every location.
+    """
+
+    cell: object
+    locations: object
+    population_indices: int | tuple[int, ...] = 0
+
+    def __post_init__(self) -> None:
+        indices = self.population_indices
+        if isinstance(indices, Integral) and not isinstance(indices, bool):
+            return
+        try:
+            indices = tuple(indices)
+        except TypeError as exc:
+            raise TypeError("Junction population indices must be integers.") from exc
+        if any(not isinstance(index, Integral) or isinstance(index, bool) for index in indices):
+            raise TypeError("Junction population indices must be integers.")
+        object.__setattr__(self, "population_indices", indices)
 
 
 @dataclass(frozen=True)
 class Junction(Point):
-    """Gap-junction coupling declaration (placeholder).
+    """Declare a symmetric, ohmic gap junction.
 
     Parameters
     ----------
     params : Params or Mapping
-        Parameter mapping for the junction (e.g. conductance). An
-        empty mapping is allowed while the full ``partner`` wiring is
-        still being designed.
-
-    Notes
-    -----
-    Only ``params`` is currently stored. A future revision should add
-    a ``partner`` field (locset / cell handle) so two-ended gap
-    junctions can be expressed in a single declaration.
-
-    Examples
-    --------
-
-    .. code-block:: python
-
-        >>> from braincell.mech import Junction, Params
-        >>> gap = Junction(params=Params(g=1.0))
-        >>> gap.params["g"]
-        1.0
+        Parameter g is the non-negative conductance with brainunit units.
+        It can be a scalar or supply one value per contact.
+    partner : JunctionEndpoint, optional
+        Endpoint opposite the endpoint passed to Network.connect_junction.
+        A declaration without a partner remains valid as placement metadata.
     """
 
     params: Params = field(default_factory=Params)
+    partner: JunctionEndpoint | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "params", Params.coerce(self.params))
+        if self.partner is not None and not isinstance(self.partner, JunctionEndpoint):
+            raise TypeError("Junction partner must be a JunctionEndpoint.")

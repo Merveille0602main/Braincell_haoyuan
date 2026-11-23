@@ -23,13 +23,18 @@ and :class:`Synapse`, and the :class:`IonInfo` named-tuple used by
 re-exports in :mod:`braincell._base`.
 """
 
-from typing import NamedTuple, Optional
+from typing import Mapping, NamedTuple, Optional
 
 import brainstate
+import braintools
 import numpy as np
+import brainunit as u
 
+from braincell._typing import ArrayLike, Size
 from ._misc import TreeNode
+from .event import NoEventInput
 from .quad.protocol import DiffEqModule, IndependentIntegration
+from ._parameter_schema import DerivedSpec, ParameterSpec, RuntimeParameterState, StateSpec
 
 __all__ = ["IonChannel", "IonInfo", "Channel", "Synapse"]
 
@@ -96,26 +101,24 @@ class IonChannel(brainstate.graph.Node, TreeNode, DiffEqModule):
 
     def __init__(
         self,
-        size: brainstate.typing.Size,
+        size: Size,
         name: Optional[str] = None,
     ):
         # size
         if isinstance(size, (list, tuple)):
             if len(size) <= 0:
-                raise ValueError(f'size must be int, or a tuple/list of int. '
-                                 f'But we got {type(size)}')
+                raise ValueError(f'size must be int, or a tuple/list of int. But we got {type(size)}')
             if not isinstance(size[0], (int, np.integer)):
-                raise ValueError('size must be int, or a tuple/list of int.'
-                                 f'But we got {type(size)}')
+                raise ValueError(f'size must be int, or a tuple/list of int.But we got {type(size)}')
             size = tuple(size)
         elif isinstance(size, (int, np.integer)):
             size = (size,)
         else:
-            raise ValueError('size must be int, or a tuple/list of int.'
-                             f'But we got {type(size)}')
+            raise ValueError(f'size must be int, or a tuple/list of int.But we got {type(size)}')
         self.size = size
-        assert len(size) >= 1, ('The size of the dendritic dynamics should be at '
-                                'least 1D: (..., n_neuron, n_compartment).')
+        assert len(size) >= 1, (
+            'The size of the dendritic dynamics should be at least 1D: (..., n_neuron, n_compartment).'
+        )
         self.name = name
 
     @property
@@ -240,7 +243,7 @@ class IonChannel(brainstate.graph.Node, TreeNode, DiffEqModule):
         """
         pass
 
-    def update(self, *args, **kwargs):
+    def ind_update(self, *args, **kwargs):
         if isinstance(self, IndependentIntegration):
             self.make_integration(*args, **kwargs)
 
@@ -248,8 +251,8 @@ class IonChannel(brainstate.graph.Node, TreeNode, DiffEqModule):
         """Hook invoked after runtime state writes a parameter.
 
         Default: no-op. Subclasses override to recompute derived
-        values when a specific parameter changes (for example, HH1952
-        channels recompute ``phi`` when ``T`` changes).
+        values when a specific parameter changes (for example, channels
+        can recompute temperature-derived factors when ``temp`` changes).
 
         Parameters
         ----------
@@ -292,10 +295,11 @@ class IonInfo(NamedTuple):
         objects or scalars, allowing representation of these properties across
         multiple neurons or compartments simultaneously.
     """
-    Ci: brainstate.typing.ArrayLike
-    Co: brainstate.typing.ArrayLike
-    E: brainstate.typing.ArrayLike
-    valence: brainstate.typing.ArrayLike
+
+    Ci: ArrayLike
+    Co: ArrayLike
+    E: ArrayLike
+    valence: ArrayLike
 
 
 class Channel(IonChannel):
@@ -310,7 +314,8 @@ class Channel(IonChannel):
         Subclasses of Channel should implement specific methods like `current`,
         `compute_derivative`, etc., to define the behavior of the particular channel type.
 
-    Example::
+    Examples
+    --------
 
     .. code-block:: python
 
@@ -325,8 +330,87 @@ class Channel(IonChannel):
 
             # Implement other required methods
     """
+
     __module__ = 'braincell'
+
+    parameters: Mapping[str, ParameterSpec] = {}
+    states: Mapping[str, StateSpec] = {}
+    derived: Mapping[str, DerivedSpec] = {}
+
+    def __getattribute__(self, name: str):
+        value = super().__getattribute__(name)
+        return value.dense_value(masked=True) if isinstance(value, RuntimeParameterState) else value
+
+    def __setattr__(self, name: str, value) -> None:
+        current = vars(self).get(name)
+        if isinstance(current, RuntimeParameterState) and not isinstance(value, RuntimeParameterState):
+            current.value = value
+            return
+        super().__setattr__(name, value)
 
 
 class Synapse(IonChannel):
+    """Base class for vectorized runtime point-synapse mechanisms.
+
+    Subclasses declare physical parameters, differential states, and public
+    derived values through explicit schemas. ``current()`` always returns an
+    inward-positive total point current. Discrete input is passed directly to
+    :meth:`apply_events`; event buffers are owned by runtime routing.
+    """
+
     __module__ = 'braincell'
+
+    parameters: Mapping[str, ParameterSpec] = {}
+    states: Mapping[str, StateSpec] = {}
+    derived: Mapping[str, DerivedSpec] = {}
+    event_input = NoEventInput()
+
+    def __init__(self, size: brainstate.typing.Size, name: Optional[str] = None, **parameters):
+        super().__init__(size=size, name=name)
+        unknown = tuple(sorted(set(parameters).difference(self.parameters)))
+        if unknown:
+            raise TypeError(f"Unknown {type(self).__name__} parameters: {unknown!r}.")
+        for field, spec in self.parameters.items():
+            value = parameters.get(field, spec.default)
+            value = braintools.init.param(value, self.varshape, allow_none=False)
+            spec.validate(value, field)
+            setattr(self, field, value)
+        self.validate_parameters()
+
+    def validate_parameters(self) -> None:
+        """Validate relations involving more than one parameter."""
+        self.validate_parameter_values({field: getattr(self, field) for field in self.parameters})
+
+    @classmethod
+    def validate_parameter_values(cls, parameters: Mapping[str, object]) -> None:
+        """Validate cross-field physical invariants for canonical columns."""
+        _ = parameters
+
+    def init_state(self, V_post=None, batch_size=None):
+        _ = V_post
+        for field, spec in self.states.items():
+            spec.validate(spec.initial, field)
+            value = _broadcast_synapse_initial(spec.initial, self.varshape, batch_size=batch_size)
+            setattr(self, field, _make_synapse_state(value))
+
+    def reset_state(self, V_post=None, batch_size=None):
+        _ = V_post
+        for field, spec in self.states.items():
+            value = _broadcast_synapse_initial(spec.initial, self.varshape, batch_size=batch_size)
+            getattr(self, field).value = value
+
+    def apply_events(self, payload, V_post=None):
+        """Apply one already-aggregated event payload vector."""
+        _ = payload, V_post
+
+
+def _make_synapse_state(value):
+    # Logical synapses are a packed SoA, not a Cell population/spatial grid.
+    from .quad.protocol import DiffEqSingleState
+
+    return DiffEqSingleState(value)
+
+
+def _broadcast_synapse_initial(initial, shape, *, batch_size=None):
+    target = ((int(batch_size),) + tuple(shape)) if batch_size is not None else tuple(shape)
+    return u.math.full(target, initial)

@@ -24,7 +24,7 @@ from braincell.morph.morphology import Morphology
 Interval = tuple[int, float, float]
 Location = tuple[int, float]
 EPSILON = 1e-12
-_BRANCH_METRIC_PROPERTIES = {"length", "mean_radius", "area", "volume"}
+_BRANCH_METRIC_PROPERTIES = {"length", "mean_radius", "diam_arc_mean", "area", "volume"}
 _UNSUPPORTED_BRANCH_METRIC_PROPERTIES = {"max_radius", "min_radius"}
 
 __all__ = [
@@ -37,11 +37,14 @@ __all__ = [
     "intersect_region_intervals",
     "difference_region_intervals",
     "complement_region_intervals",
+    "fork_points_locations",
     "branch_points_locations",
     "terminal_locations",
     "uniform_samples_from_region",
     "random_samples_from_region",
     "normalize_locset_points",
+    "unique_locset_points",
+    "concat_locset_points",
     "union_locset_points",
     "intersect_locset_points",
     "difference_locset_points",
@@ -70,9 +73,7 @@ def _broadcast_values(name: str, values: tuple[object, ...], size: int) -> tuple
         return values
     if len(values) == 1:
         return values * size
-    raise ValueError(
-        f"{name} has length {len(values)!r}, which cannot be broadcast to {size!r}."
-    )
+    raise ValueError(f"{name} has length {len(values)!r}, which cannot be broadcast to {size!r}.")
 
 
 def _coerce_property_name(property_name: object) -> str:
@@ -118,9 +119,7 @@ def _coerce_filterable_scalar(property_name: str, value: object) -> object:
         return int(value)
     if isinstance(value, Real):
         return float(value)
-    raise TypeError(
-        f"Property {property_name!r} is not scalar-filterable; got {type(value).__name__!s}."
-    )
+    raise TypeError(f"Property {property_name!r} is not scalar-filterable; got {type(value).__name__!s}.")
 
 
 def _resolve_branch_property(morpho: Morphology, branch_index: int, property_name: str) -> object:
@@ -139,9 +138,7 @@ def _resolve_branch_property(morpho: Morphology, branch_index: int, property_nam
     if property_name in _BRANCH_METRIC_PROPERTIES:
         return getattr(branch_view, property_name)
     if property_name in _UNSUPPORTED_BRANCH_METRIC_PROPERTIES:
-        raise ValueError(
-            f"Branch property {property_name!r} is not supported in this version."
-        )
+        raise ValueError(f"Branch property {property_name!r} is not supported in this version.")
     if hasattr(branch_view, property_name):
         return _coerce_filterable_scalar(property_name, getattr(branch_view, property_name))
     raise ValueError(f"Unknown branch property {property_name!r}.")
@@ -176,18 +173,14 @@ def _parse_bounds(bounds: object) -> tuple[object | None, object | None]:
         return u.Quantity(float(mantissa[0]), unit), u.Quantity(float(mantissa[1]), unit)
     if isinstance(bounds, (tuple, list)) and len(bounds) == 2:
         return bounds[0], bounds[1]
-    raise TypeError(
-        "bounds must be either (low, high) tuple/list or a 2-element quantity vector."
-    )
+    raise TypeError("bounds must be either (low, high) tuple/list or a 2-element quantity vector.")
 
 
 def _normalize_numeric_bound(bound: object | None, *, property_name: str) -> float | None:
     if bound is None:
         return None
     if _is_quantity(bound):
-        raise ValueError(
-            f"Property {property_name!r} is not quantity-valued; quantity bounds are not allowed."
-        )
+        raise ValueError(f"Property {property_name!r} is not quantity-valued; quantity bounds are not allowed.")
     if isinstance(bound, bool) or not isinstance(bound, Real):
         raise TypeError(f"{property_name} bounds must be numeric.")
     return float(bound)
@@ -202,9 +195,7 @@ def _normalize_quantity_bound(
     if bound is None:
         return None
     if not _is_quantity(bound):
-        raise ValueError(
-            f"Property {property_name!r} is quantity-valued; bounds must include units."
-        )
+        raise ValueError(f"Property {property_name!r} is quantity-valued; bounds must include units.")
     return _to_decimal_scalar(bound, unit=unit, name=property_name)
 
 
@@ -216,17 +207,13 @@ def _matches_range(value: object, *, low: object | None, high: object | None, cl
         high_value = _normalize_quantity_bound(high, property_name=property_name, unit=unit)
     else:
         if isinstance(value, bool) or not isinstance(value, Real):
-            raise TypeError(
-                f"Property {property_name!r} does not support numeric range filtering."
-            )
+            raise TypeError(f"Property {property_name!r} does not support numeric range filtering.")
         current = float(value)
         low_value = _normalize_numeric_bound(low, property_name=property_name)
         high_value = _normalize_numeric_bound(high, property_name=property_name)
 
     if low_value is not None and high_value is not None and low_value > high_value:
-        raise ValueError(
-            f"Lower bound must be <= upper bound for property {property_name!r}."
-        )
+        raise ValueError(f"Lower bound must be <= upper bound for property {property_name!r}.")
 
     if low_value is not None:
         if _left_closed(closed):
@@ -252,9 +239,7 @@ def _matches_in(value: object, *, candidates: tuple[object, ...], property_name:
             if _is_quantity(candidate):
                 normalized.add(_to_decimal_scalar(candidate, unit=unit, name=property_name))
             elif isinstance(candidate, bool) or not isinstance(candidate, Real):
-                raise TypeError(
-                    f"Property {property_name!r} is quantity-valued; candidates must be numeric/quantity."
-                )
+                raise TypeError(f"Property {property_name!r} is quantity-valued; candidates must be numeric/quantity.")
             else:
                 normalized.add(float(candidate))
         return current in normalized
@@ -285,8 +270,7 @@ def branch_slice_intervals(
         dist_value = _coerce_norm_coord("dist", raw_dist)
         if not (0.0 <= prox_value < dist_value <= 1.0):
             raise ValueError(
-                "BranchSlice expects 0.0 <= prox < dist <= 1.0, "
-                f"got prox={prox_value!r}, dist={dist_value!r}."
+                f"BranchSlice expects 0.0 <= prox < dist <= 1.0, got prox={prox_value!r}, dist={dist_value!r}."
             )
         intervals.append((idx, prox_value, dist_value))
     return tuple(intervals)
@@ -355,9 +339,7 @@ def normalize_region_intervals(
         prox = _clip_norm_x(float(raw_prox), epsilon=epsilon)
         dist = _clip_norm_x(float(raw_dist), epsilon=epsilon)
         if prox < 0.0 - epsilon or dist > 1.0 + epsilon:
-            raise ValueError(
-                f"Interval coordinates must be within [0, 1], got prox={prox!r}, dist={dist!r}."
-            )
+            raise ValueError(f"Interval coordinates must be within [0, 1], got prox={prox!r}, dist={dist!r}.")
         if dist - prox <= epsilon:
             continue
         grouped.setdefault(branch, []).append((prox, dist))
@@ -512,6 +494,8 @@ def _round_digits_from_epsilon(epsilon: float) -> int:
 
 def _normalize_loc_x(value: float, *, epsilon: float) -> float:
     x = _clip_norm_x(float(value), epsilon=epsilon)
+    if not np.isfinite(x):
+        raise ValueError(f"Locset coordinate x must be finite, got {value!r}.")
     if x < 0.0 - epsilon or x > 1.0 + epsilon:
         raise ValueError(f"Locset coordinate x must be within [0, 1], got {value!r}.")
     return x
@@ -522,15 +506,48 @@ def normalize_locset_points(
     *,
     epsilon: float = EPSILON,
 ) -> tuple[Location, ...]:
+    """Validate and canonicalize locations without changing row identity."""
     digits = _round_digits_from_epsilon(epsilon)
-    normalized: set[Location] = set()
+    normalized: list[Location] = []
     for raw_branch, raw_x in points:
-        if not isinstance(raw_branch, int):
+        if isinstance(raw_branch, bool) or not isinstance(raw_branch, Integral):
             raise TypeError(f"Branch index must be int, got {type(raw_branch).__name__!s}.")
+        if isinstance(raw_x, bool) or not isinstance(raw_x, Real):
+            raise TypeError(f"Locset coordinate x must be a real number, got {type(raw_x).__name__!s}.")
         branch = int(raw_branch)
-        x = _normalize_loc_x(float(raw_x), epsilon=epsilon)
-        normalized.add((branch, round(x, digits)))
-    return tuple(sorted(normalized, key=lambda item: (item[0], item[1])))
+        if branch < 0:
+            raise ValueError(f"Branch index must be non-negative, got {branch!r}.")
+        if branch > np.iinfo(np.int64).max:
+            raise ValueError(f"Branch index exceeds the int64 range, got {branch!r}.")
+        x = _normalize_loc_x(raw_x, epsilon=epsilon)
+        normalized.append((branch, round(x, digits)))
+    return tuple(normalized)
+
+
+def unique_locset_points(
+    points: tuple[Location, ...] | list[Location],
+    *,
+    epsilon: float = EPSILON,
+) -> tuple[Location, ...]:
+    """Return canonical locations with stable first-occurrence deduplication."""
+    result: list[Location] = []
+    seen: set[Location] = set()
+    for point in normalize_locset_points(points, epsilon=epsilon):
+        if point in seen:
+            continue
+        seen.add(point)
+        result.append(point)
+    return tuple(result)
+
+
+def concat_locset_points(
+    left: tuple[Location, ...] | list[Location],
+    right: tuple[Location, ...] | list[Location],
+    *,
+    epsilon: float = EPSILON,
+) -> tuple[Location, ...]:
+    """Concatenate canonical location rows while preserving duplicates."""
+    return normalize_locset_points(tuple(left) + tuple(right), epsilon=epsilon)
 
 
 def union_locset_points(
@@ -539,7 +556,7 @@ def union_locset_points(
     *,
     epsilon: float = EPSILON,
 ) -> tuple[Location, ...]:
-    return normalize_locset_points(tuple(left) + tuple(right), epsilon=epsilon)
+    return unique_locset_points(tuple(left) + tuple(right), epsilon=epsilon)
 
 
 def intersect_locset_points(
@@ -548,9 +565,8 @@ def intersect_locset_points(
     *,
     epsilon: float = EPSILON,
 ) -> tuple[Location, ...]:
-    left_norm = set(normalize_locset_points(left, epsilon=epsilon))
-    right_norm = set(normalize_locset_points(right, epsilon=epsilon))
-    return tuple(sorted(left_norm & right_norm, key=lambda item: (item[0], item[1])))
+    right_support = set(unique_locset_points(right, epsilon=epsilon))
+    return tuple(point for point in unique_locset_points(left, epsilon=epsilon) if point in right_support)
 
 
 def difference_locset_points(
@@ -559,23 +575,63 @@ def difference_locset_points(
     *,
     epsilon: float = EPSILON,
 ) -> tuple[Location, ...]:
-    left_norm = set(normalize_locset_points(left, epsilon=epsilon))
-    right_norm = set(normalize_locset_points(right, epsilon=epsilon))
-    return tuple(sorted(left_norm - right_norm, key=lambda item: (item[0], item[1])))
+    right_support = set(unique_locset_points(right, epsilon=epsilon))
+    return tuple(point for point in unique_locset_points(left, epsilon=epsilon) if point not in right_support)
+
+
+def fork_points_locations(morpho: Morphology, *, epsilon: float = EPSILON) -> tuple[Location, ...]:
+    """Return topology junctions incident to at least three branches."""
+    location_parent: dict[Location, Location] = {}
+    location_order: list[Location] = []
+
+    def add(point: Location) -> Location:
+        normalized = normalize_locset_points((point,), epsilon=epsilon)[0]
+        if normalized not in location_parent:
+            location_parent[normalized] = normalized
+            location_order.append(normalized)
+        return normalized
+
+    def find(point: Location) -> Location:
+        root = point
+        while location_parent[root] != root:
+            root = location_parent[root]
+        while location_parent[point] != point:
+            parent = location_parent[point]
+            location_parent[point] = root
+            point = parent
+        return root
+
+    def union(left: Location, right: Location) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            location_parent[right_root] = left_root
+
+    for edge in morpho.edges:
+        parent = add((edge.parent.index, float(edge.parent_x)))
+        child = add((edge.child.index, float(edge.child_x)))
+        union(parent, child)
+
+    groups: dict[Location, list[Location]] = {}
+    for point in location_order:
+        groups.setdefault(find(point), []).append(point)
+
+    branch_depth: dict[int, int] = {}
+    for branch in morpho.branch_by_order(order="depth"):
+        branch_depth[branch.index] = 0 if branch.parent is None else branch_depth[branch.parent.index] + 1
+
+    forks: list[Location] = []
+    for points in groups.values():
+        if len({branch_id for branch_id, _ in points}) < 3:
+            continue
+        canonical = min(points, key=lambda point: (branch_depth[point[0]], point[0], point[1]))
+        forks.append(canonical)
+    return tuple(forks)
 
 
 def branch_points_locations(morpho: Morphology, *, epsilon: float = EPSILON) -> tuple[Location, ...]:
-    points: list[Location] = []
-    for parent_branch in range(len(morpho.branches)):
-        children = morpho.branch(index=parent_branch).children
-        if len(children) < 2:
-            continue
-        for child in children:
-            parent_x = child.parent_x
-            if parent_x is None:
-                continue
-            points.append((parent_branch, float(parent_x)))
-    return normalize_locset_points(points, epsilon=epsilon)
+    """Compatibility alias for :func:`fork_points_locations`."""
+    return fork_points_locations(morpho, epsilon=epsilon)
 
 
 def terminal_locations(morpho: Morphology, *, epsilon: float = EPSILON) -> tuple[Location, ...]:
@@ -624,7 +680,7 @@ def uniform_samples_from_region(
     n = _coerce_positive_count("count", count)
     entries = _sample_entries(morpho, intervals, epsilon=epsilon)
     if not entries:
-        return ()
+        raise ValueError("UniformSamples cannot sample from an empty or zero-length region.")
 
     lengths = np.asarray([item[3] for item in entries], dtype=float)
     cumulative = np.cumsum(lengths)
@@ -658,7 +714,7 @@ def random_samples_from_region(
         raise TypeError(f"seed must be an integer, got {seed!r}.")
     entries = _sample_entries(morpho, intervals, epsilon=epsilon)
     if not entries:
-        return ()
+        raise ValueError("RandomSamples cannot sample from an empty or zero-length region.")
 
     lengths = np.asarray([item[3] for item in entries], dtype=float)
     probs = lengths / np.sum(lengths)

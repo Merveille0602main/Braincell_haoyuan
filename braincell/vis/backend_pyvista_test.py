@@ -19,10 +19,17 @@ import types
 import unittest
 from unittest import mock
 
+try:
+    import pyvista as pv
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    pv = None
+
 import brainunit as u
 
 from braincell import Branch, Morphology
 from braincell import vis
+from braincell.vis._testing import FIXTURE_DIR, VALID_SWC_FIXTURES
+from braincell.vis.backend import BackendChooser
 from braincell.vis.backend_pyvista import PyVistaBackend
 from braincell.vis.scene import RenderRequest
 from braincell.vis.scene3d import build_render_scene_3d
@@ -62,6 +69,7 @@ class _FakePlotter:
         self._rendered = False
         self.pick_callback = None
         self.pick_enabled = False
+        self.export_html_calls = []
 
     def set_background(self, color) -> None:
         self.background = color
@@ -86,6 +94,10 @@ class _FakePlotter:
     def close(self) -> None:
         self.closed = True
 
+    def export_html(self, filename=None):
+        self.export_html_calls.append(filename)
+        return "<html><body>OfflineLocalView</body></html>"
+
     def enable_point_picking(self, *, callback, show_message=True, use_picker=True):
         self.pick_callback = callback
         self.pick_enabled = True
@@ -94,9 +106,7 @@ class _FakePlotter:
 class _NeedsRenderedPlotter(_FakePlotter):
     def show(self, **kwargs):
         if not self._rendered:
-            raise AttributeError(
-                "This plotter has not yet been set up and rendered with ``show()``."
-            )
+            raise AttributeError("This plotter has not yet been set up and rendered with ``show()``.")
         return super().show(**kwargs)
 
 
@@ -126,6 +136,12 @@ class _AlwaysFailPlotter(_FakePlotter):
     def show(self, **kwargs):
         self.show_calls.append(kwargs)
         raise RuntimeError(f"{kwargs['jupyter_backend']} boom")
+
+
+class _AlwaysFailIncludingExportPlotter(_AlwaysFailPlotter):
+    def export_html(self, filename=None):
+        self.export_html_calls.append(filename)
+        raise RuntimeError("html boom")
 
 
 def _request(*, notebook: bool | None = None, jupyter_backend: str | None = None, return_plotter: bool = False):
@@ -234,6 +250,17 @@ class PyVistaBackendTest(unittest.TestCase):
 
         self.assertEqual(viewer["viewer"]["jupyter_backend"], "client")
 
+    def test_render_exports_raw_iframe_for_html_backend(self) -> None:
+        fake_pv = _fake_pyvista(_FakePlotter)
+        backend = PyVistaBackend()
+
+        with mock.patch.dict("sys.modules", {"pyvista": fake_pv}):
+            viewer = backend.render(_request(notebook=True, jupyter_backend="html"))
+
+        self.assertIn("<iframe", viewer._repr_html_())
+        self.assertIn("OfflineLocalView", viewer._repr_html_())
+        self.assertEqual(repr(viewer), "<interactive PyVista scene>")
+
     def test_render_falls_back_from_client_to_html(self) -> None:
         fake_pv = _fake_pyvista(_ClientFailsPlotter)
         backend = PyVistaBackend()
@@ -242,7 +269,8 @@ class PyVistaBackendTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {}, clear=True):
                 viewer = backend.render(_request(notebook=True))
 
-        self.assertEqual(viewer["viewer"]["jupyter_backend"], "html")
+        self.assertIn("<iframe", viewer._repr_html_())
+        self.assertIn("OfflineLocalView", viewer._repr_html_())
 
     def test_render_uses_trame_first_when_display_exists(self) -> None:
         fake_pv = _fake_pyvista(_FakePlotter)
@@ -276,7 +304,7 @@ class PyVistaBackendTest(unittest.TestCase):
         self.assertEqual(viewer["viewer"]["jupyter_backend"], "client")
 
     def test_render_reports_attempted_backends_on_failure(self) -> None:
-        fake_pv = _fake_pyvista(_AlwaysFailPlotter)
+        fake_pv = _fake_pyvista(_AlwaysFailIncludingExportPlotter)
         backend = PyVistaBackend()
 
         with mock.patch.dict("sys.modules", {"pyvista": fake_pv}):
@@ -298,7 +326,7 @@ class PyVistaBackendTest(unittest.TestCase):
 
         with mock.patch.dict("sys.modules", {"pyvista": fake_pv}):
             with self.assertRaisesRegex(RuntimeError, "PyVista returned no notebook viewer"):
-                backend.render(_request(notebook=True, jupyter_backend="html"))
+                backend.render(_request(notebook=True, jupyter_backend="trame"))
 
 
 class PyVistaPickMetadataTest(unittest.TestCase):
@@ -349,3 +377,25 @@ class PyVistaPickMetadataTest(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].branch_type, "soma")
         self.assertIsNotNone(captured[0].position_um)
+
+
+# =============================================================================
+# Real pyvista, real SWC fixtures — the only non-faked render path in this file
+# =============================================================================
+
+
+class RealFilePyVistaVisTest(unittest.TestCase):
+    def test_valid_real_swc_fixtures_render_with_pyvista_backend(self) -> None:
+        if pv is None:
+            self.skipTest("pyvista is not installed.")
+        for fixture_name in VALID_SWC_FIXTURES:
+            with self.subTest(fixture=fixture_name):
+                tree = Morphology.from_swc(FIXTURE_DIR / fixture_name)
+                backend = PyVistaBackend(plotter_kwargs={"off_screen": True}, show_axes=False)
+                chooser = BackendChooser(backends=(backend,))
+                plotter = tree.vis3d(backend="pyvista", chooser=chooser)
+
+                self.assertIsInstance(plotter, pv.Plotter)
+                self.assertIsNotNone(plotter.renderer)
+                self.assertGreater(len(plotter.renderer.actors), 0)
+                plotter.close()

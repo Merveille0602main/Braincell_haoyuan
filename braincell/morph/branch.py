@@ -256,8 +256,7 @@ class Branch:
         if cls._BRANCH_TYPE is not None:
             if type is not _UNSET:
                 raise TypeError(
-                    f"{cls.__name__}.from_lengths() does not accept 'type'. "
-                    f"The type is fixed to {cls._BRANCH_TYPE!r}."
+                    f"{cls.__name__}.from_lengths() does not accept 'type'. The type is fixed to {cls._BRANCH_TYPE!r}."
                 )
             type = cls._BRANCH_TYPE
         elif type is _UNSET:
@@ -364,8 +363,7 @@ class Branch:
         if cls._BRANCH_TYPE is not None:
             if type is not _UNSET:
                 raise TypeError(
-                    f"{cls.__name__}.from_points() does not accept 'type'. "
-                    f"The type is fixed to {cls._BRANCH_TYPE!r}."
+                    f"{cls.__name__}.from_points() does not accept 'type'. The type is fixed to {cls._BRANCH_TYPE!r}."
                 )
             type = cls._BRANCH_TYPE
         elif type is _UNSET:
@@ -424,26 +422,18 @@ class Branch:
     ) -> tuple[u.Quantity[u.um], u.Quantity[u.um]]:
         if radii is not None:
             if radii_proximal is not None or radii_distal is not None:
-                raise TypeError(
-                    "`radii` and `radii_proximal`/`radii_distal` cannot be provided together"
-                )
+                raise TypeError("`radii` and `radii_proximal`/`radii_distal` cannot be provided together")
             shared_radii = normalize_param(radii, name="radii", unit=u.um, shape=(None,))
             if len(shared_radii) != n_shared:
-                raise ValueError(
-                    f"{method_name}() shared `radii` must have length {n_shared}."
-                )
+                raise ValueError(f"{method_name}() shared `radii` must have length {n_shared}.")
             return shared_radii[:-1], shared_radii[1:]
 
         if radii_proximal is not None or radii_distal is not None:
             if radii_proximal is None or radii_distal is None:
-                raise TypeError(
-                    "`radii_proximal` and `radii_distal` must be provided together"
-                )
+                raise TypeError("`radii_proximal` and `radii_distal` must be provided together")
             return radii_proximal, radii_distal
 
-        raise TypeError(
-            "one of `radii` or (`radii_proximal` and `radii_distal`) is required"
-        )
+        raise TypeError("one of `radii` or (`radii_proximal` and `radii_distal`) is required")
 
     @staticmethod
     def _canonicalize_segments(
@@ -536,8 +526,7 @@ class Branch:
 
         if not u.math.allclose(self.radii_distal[:-1], self.radii_proximal[1:]):
             raise ValueError(
-                "Branch radii are discontinuous across segment boundaries; use "
-                "radii_proximal and radii_distal."
+                "Branch radii are discontinuous across segment boundaries; use radii_proximal and radii_distal."
             )
         return u.math.concatenate((self.radii_proximal[:1], self.radii_distal), axis=0)
 
@@ -567,8 +556,7 @@ class Branch:
             return None
         if not u.math.allclose(self.points_distal[:-1], self.points_proximal[1:]):
             raise ValueError(
-                "Branch points are discontinuous across segment boundaries; use "
-                "points_proximal and points_distal."
+                "Branch points are discontinuous across segment boundaries; use points_proximal and points_distal."
             )
         return u.math.concatenate((self.points_proximal[:1], self.points_distal), axis=0)
 
@@ -644,7 +632,22 @@ class Branch:
         return u.Quantity(np.sum(lengths_um * values_um) / total_length_um, u.um)
 
     @property
-    def areas(self) -> u.Quantity[u.um ** 2]:
+    def diam_arc_mean(self) -> u.Quantity[u.um]:
+        """Return the arc-length-weighted mean diameter of this branch.
+
+        This is the branch-level diameter counterpart to :attr:`mean_radius`:
+        each segment contributes its average diameter ``r_proximal + r_distal``
+        weighted by segment arc length.
+
+        Returns
+        -------
+        Quantity[u.um]
+            Length-weighted average diameter.
+        """
+        return 2.0 * self.mean_radius
+
+    @property
+    def areas(self) -> u.Quantity[u.um**2]:
         """Lateral surface area of each segment (frustum formula).
 
         Returns
@@ -661,10 +664,10 @@ class Branch:
         """
         lengths_um, r0_um, r1_um = self._segment_arrays_um()
         values = np.pi * (r0_um + r1_um) * np.sqrt(lengths_um * lengths_um + (r1_um - r0_um) * (r1_um - r0_um))
-        return u.Quantity(values, u.um ** 2)
+        return u.Quantity(values, u.um**2)
 
     @property
-    def area(self) -> u.Quantity[u.um ** 2]:
+    def area(self) -> u.Quantity[u.um**2]:
         """Total lateral surface area (sum of segment areas).
 
         Returns
@@ -675,7 +678,7 @@ class Branch:
         return self.areas.sum()
 
     @property
-    def volumes(self) -> u.Quantity[u.um ** 3]:
+    def volumes(self) -> u.Quantity[u.um**3]:
         """Per-segment volumes (frustum formula).
 
         Returns
@@ -685,10 +688,10 @@ class Branch:
         """
         lengths_um, r0_um, r1_um = self._segment_arrays_um()
         values = np.pi * lengths_um * (r0_um * r0_um + r0_um * r1_um + r1_um * r1_um) / 3.0
-        return u.Quantity(values, u.um ** 3)
+        return u.Quantity(values, u.um**3)
 
     @property
-    def volume(self) -> u.Quantity[u.um ** 3]:
+    def volume(self) -> u.Quantity[u.um**3]:
         """Total volume (sum of segment volumes).
 
         Returns
@@ -827,9 +830,15 @@ class Branch:
         chooser : BackendChooser or None
             Explicit backend chooser; overrides *backend* when given.
         notebook : bool or None
-            Enable notebook-specific rendering when *True*.
+            Enable notebook-specific rendering when *True*. Use this in
+            Jupyter notebooks or notebook-based docs so the 3-D scene is
+            embedded in the cell output; leave it false/omitted when you
+            want the raw backend plotter in a script.
         jupyter_backend : str or None
-            Jupyter backend name for notebook rendering.
+            Jupyter backend name for notebook rendering. Use ``"html"``
+            for static HTML docs and headless builds; use interactive
+            server/client backends only in a live Jupyter session
+            configured for them.
         return_plotter : bool
             If *True*, return the backend plotter object instead of
             displaying the figure.
@@ -876,14 +885,14 @@ class Branch:
 
     def __str__(self) -> str:
         return (
-            f"{'-'*35}\n"
+            f"{'-' * 35}\n"
             f"{'type':<12} | {self.type}\n"
             f"{'n_segments':<12} | {self.n_segments}\n"
             f"{'length':<12} | {self.length:.2f}\n"
             f"{'mean_radius':<12} | {self.mean_radius:.2f}\n"
             f"{'area':<12} | {self.area:.2f}\n"
             f"{'volume':<12} | {self.volume:.2f}\n"
-            f"{'-'*35}\n"
+            f"{'-' * 35}\n"
         )
 
     def save_checkpoint(self, path):
@@ -1120,8 +1129,5 @@ def branch_class_for_type(branch_type: str) -> type[Branch]:
     """
     cls = _BRANCH_TYPE_TO_CLASS.get(branch_type)
     if cls is None:
-        raise ValueError(
-            f"Unknown branch type {branch_type!r}. "
-            f"Allowed types: {sorted(_BRANCH_TYPE_TO_CLASS)!r}."
-        )
+        raise ValueError(f"Unknown branch type {branch_type!r}. Allowed types: {sorted(_BRANCH_TYPE_TO_CLASS)!r}.")
     return cls

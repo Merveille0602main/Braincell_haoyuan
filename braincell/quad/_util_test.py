@@ -28,7 +28,7 @@ import numpy as np
 
 from braincell import (
     DiffEqModule,
-    DiffEqState,
+    DiffEqSingleState,
     IndependentIntegration,
 )
 
@@ -49,7 +49,7 @@ class _LinearDecay(brainstate.nn.Module, DiffEqModule):
     def __init__(self, shape=(2,)):
         super().__init__()
         self.tau = 10.0 * u.ms
-        self.x = DiffEqState(jnp.ones(shape, dtype=_FLOAT_DTYPE) * u.mV)
+        self.x = DiffEqSingleState(jnp.ones(shape, dtype=_FLOAT_DTYPE) * u.mV)
         # A non-DiffEqState should be ignored by the integrator.
         self.aux = brainstate.ShortTermState(jnp.zeros(shape, dtype=_FLOAT_DTYPE))
         self.pre_calls = 0
@@ -69,27 +69,41 @@ class _IndepSub(brainstate.nn.Module, DiffEqModule, IndependentIntegration):
     def __init__(self):
         IndependentIntegration.__init__(self, "euler")
         brainstate.nn.Module.__init__(self)
-        self.y = DiffEqState(jnp.ones(2, dtype=_FLOAT_DTYPE) * u.mV)
+        self.y = DiffEqSingleState(jnp.ones(2, dtype=_FLOAT_DTYPE) * u.mV)
 
     def compute_derivative(self, *args, **kwargs):
-        self.y.derivative = -self.y.value / (5. * u.ms)
+        self.y.derivative = -self.y.value / (5.0 * u.ms)
+
+
+class _DependentChild(brainstate.nn.Module, DiffEqModule):
+    def __init__(self):
+        super().__init__()
+        self.z = DiffEqSingleState(jnp.ones(2, dtype=_FLOAT_DTYPE) * u.mV)
+
+    def compute_derivative(self, *args, **kwargs):
+        self.z.derivative = -self.z.value / (7.0 * u.ms)
+
+
+class _IndepSubWithDependentChild(_IndepSub):
+    def __init__(self):
+        super().__init__()
+        self.child = _DependentChild()
 
 
 class _OuterWithIndep(brainstate.nn.Module, DiffEqModule):
-    def __init__(self):
+    def __init__(self, sub=None):
         super().__init__()
-        self.x = DiffEqState(jnp.ones(2, dtype=_FLOAT_DTYPE) * u.mV)
-        self.sub = _IndepSub()
+        self.x = DiffEqSingleState(jnp.ones(2, dtype=_FLOAT_DTYPE) * u.mV)
+        self.sub = _IndepSub() if sub is None else sub
 
     def compute_derivative(self, *args, **kwargs):
-        self.x.derivative = -self.x.value / (10. * u.ms)
+        self.x.derivative = -self.x.value / (10.0 * u.ms)
 
 
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
 class SplitDiffEqStatesTest(unittest.TestCase):
-
     def test_separates_diffeq_and_other_states(self):
         m = _LinearDecay()
         all_st, diffeq_st, other_st = split_diffeq_states(m)
@@ -99,7 +113,7 @@ class SplitDiffEqStatesTest(unittest.TestCase):
         self.assertEqual(set(diffeq_st.keys()), {("x",)})
         self.assertEqual(set(other_st.keys()), {("aux",)})
 
-    def test_excludes_independent_submodules(self):
+    def test_excludes_states_directly_owned_by_independent_submodules(self):
         m = _OuterWithIndep()
         _, diffeq_st, _ = split_diffeq_states(m)
         # The outer ``x`` is integrated, but ``sub.y`` lives under an
@@ -108,9 +122,24 @@ class SplitDiffEqStatesTest(unittest.TestCase):
         self.assertIn(("x",), diffeq_keys)
         self.assertNotIn(("sub", "y"), diffeq_keys)
 
+    def test_keeps_dependent_child_state_under_independent_parent(self):
+        m = _OuterWithIndep(sub=_IndepSubWithDependentChild())
+        _, diffeq_st, _ = split_diffeq_states(m)
+        diffeq_keys = set(diffeq_st.keys())
+        self.assertIn(("x",), diffeq_keys)
+        self.assertNotIn(("sub", "y"), diffeq_keys)
+        self.assertIn(("sub", "child", "z"), diffeq_keys)
+
+    def test_excluded_paths_still_exclude_subtrees(self):
+        m = _OuterWithIndep(sub=_IndepSubWithDependentChild())
+        _, diffeq_st, _ = split_diffeq_states(m, excluded_paths=(("sub", "child"),))
+        diffeq_keys = set(diffeq_st.keys())
+        self.assertIn(("x",), diffeq_keys)
+        self.assertNotIn(("sub", "y"), diffeq_keys)
+        self.assertNotIn(("sub", "child", "z"), diffeq_keys)
+
 
 class ApplyStandardSolverStepTest(unittest.TestCase):
-
     def test_passes_array_state_and_invokes_hooks(self):
         m = _LinearDecay()
 
@@ -123,8 +152,8 @@ class ApplyStandardSolverStepTest(unittest.TestCase):
             observed["fn"] = fn
             return y0, {}  # no-op solver: return inputs unchanged
 
-        with brainstate.environ.context(t=0. * u.ms, dt=0.1 * u.ms):
-            apply_standard_solver_step(fake_step, m, 0. * u.ms, 0.1 * u.ms)
+        with brainstate.environ.context(t=0.0 * u.ms, dt=0.1 * u.ms):
+            apply_standard_solver_step(fake_step, m, 0.0 * u.ms, 0.1 * u.ms)
 
         # The merged y0 has shape ``(*pop_shape, n_diffeq_state)``; with one
         # scalar state of shape (2,) and 'concat' merging it stays (2,).
@@ -135,7 +164,7 @@ class ApplyStandardSolverStepTest(unittest.TestCase):
 
     def test_rejects_non_diffeq_module(self):
         with self.assertRaises(AssertionError):
-            apply_standard_solver_step(lambda *a, **k: None, object(), 0., 0.1)
+            apply_standard_solver_step(lambda *a, **k: None, object(), 0.0, 0.1)
 
     def test_rejects_unknown_merging(self):
         m = _LinearDecay()
@@ -143,7 +172,7 @@ class ApplyStandardSolverStepTest(unittest.TestCase):
             apply_standard_solver_step(
                 lambda *a, **k: None,
                 m,
-                0. * u.ms,
+                0.0 * u.ms,
                 0.1 * u.ms,
                 merging="bogus",
             )
@@ -154,13 +183,12 @@ class ApplyStandardSolverStepTest(unittest.TestCase):
             apply_standard_solver_step(
                 "not callable",  # type: ignore[arg-type]
                 m,
-                0. * u.ms,
+                0.0 * u.ms,
                 0.1 * u.ms,
             )
 
 
 class JacrevLastDimTest(unittest.TestCase):
-
     def test_diagonal_linear_function(self):
         def f(y):
             return -2.0 * y

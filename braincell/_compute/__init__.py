@@ -13,22 +13,21 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Private compute layer: execution view and runtime state built from CVs.
+"""Private compute layer: scheduling and runtime state built from CVs.
 
-This package turns the immutable CV layer into the structures the voltage
-solver and mechanism-lowering code actually execute against:
+This package turns the immutable CV/node-tree declaration layer into the
+runtime structures the solver and mechanism-lowering code execute against:
 
-- :mod:`braincell._compute.topology` — merged point/edge execution graph
-- :mod:`braincell._compute.runtime` — mechanism lowering and runtime state
+- :mod:`braincell._compute.scheduling` — node-tree scheduling helpers
+- :mod:`braincell._compute.layouts` — mechanism layout records, clamp routing,
+  and state-buffer allocation
+- :mod:`braincell._compute.ions` — runtime ion instantiation and synchronization
+- :mod:`braincell._compute.bindings` — channel/ion binding and runtime nodes
+- :mod:`braincell._compute.state` — :class:`CellRuntimeState`, the mutable
+  runtime bridge a ``Cell`` compiles itself into
+- :mod:`braincell._compute.bridge` — CV ↔ point-space conversion helpers
 - :mod:`braincell._compute.table` — mechanism-object bookkeeping
 
 This package is private. External code should access the same symbols
 through :mod:`braincell` re-exports where appropriate.
 """
-
-from .topology import PointScheduling, PointTree
-
-__all__ = [
-    "PointScheduling",
-    "PointTree",
-]

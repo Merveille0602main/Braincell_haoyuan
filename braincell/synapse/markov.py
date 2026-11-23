@@ -15,218 +15,140 @@
 
 # -*- coding: utf-8 -*-
 
-from typing import Union, Callable
-
-import brainpy
 import brainstate
-import braintools
 import brainunit as u
 
+from braincell._base import HHTypedNeuron, Synapse
+from braincell._synapse_schema import DerivedSpec, ParameterSpec, StateSpec, positive
 from braincell.mech import register_synapse
+from braincell.event import ScalarEventInput
 
 __all__ = [
+    'ExpSyn',
+    'Exp2Syn',
     'AMPA',
     'GABAa',
     'NMDA',
 ]
 
 
-@register_synapse("AMPA")
-class AMPA(brainpy.state.Synapse):
-    """
-    AMPA synapse model class.
-
-    This class implements the dynamics of an AMPA-type synapse using an exponential Euler integration scheme.
-    The synaptic conductance is updated based on presynaptic spike input and time constants.
-
-    Args:
-        in_size (brainstate.typing.Size): The input size or shape of the synapse.
-        alpha (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The rise rate constant (default: 0.98 / u.ms).
-        beta (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The decay rate constant (default: 0.18 / u.ms).
-        T (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The synaptic efficacy or scaling factor (default: 0.5).
-    """
-
-    def __init__(
-        self,
-        in_size: brainstate.typing.Size,
-        alpha: Union[brainstate.typing.ArrayLike, Callable] = 0.98 / u.ms,
-        beta: Union[brainstate.typing.ArrayLike, Callable] = 0.18 / u.ms,
-        T: Union[brainstate.typing.ArrayLike, Callable] = 0.5,
-    ):
-        super().__init__(in_size=in_size)
-
-        # parameters
-        self.alpha = braintools.init.param(alpha)
-        self.beta = braintools.init.param(beta)
-        self.T = braintools.init.param(T)
-
-    def init_state(self, **kwargs):
-        """
-        Initialize the hidden state `g` (synaptic conductance) to zeros.
-        """
-        self.g = brainstate.HiddenState(braintools.init.param(u.math.zeros, self.varshape))
-
-    def reset_state(self, **kwargs):
-        """
-        Reset the hidden state `g` (synaptic conductance) to zeros.
-        """
-        self.g.value = braintools.init.param(u.math.zeros, self.varshape)
-
-    def update(self, pre_spike):
-        """
-        Update the synaptic conductance `g` based on the presynaptic spike input.
-
-        The update follows the equation:
-            dg/dt = alpha * pre_spike * T * (1 - g) - beta * g
-
-        Args:
-            pre_spike: Presynaptic spike input.
-
-        Returns:
-            Updated synaptic conductance value.
-        """
-        dg = lambda g: self.alpha * pre_spike * self.T * (1 - g) - self.beta * g
-        self.g.value = brainstate.nn.exp_euler_step(dg, self.g.value)
-        return self.g.value
+def _decay_factor(dt, tau):
+    """Return the exact exponential decay factor over one timestep."""
+    return u.math.exp(-(dt / tau))
 
 
-@register_synapse("GABAa")
-class GABAa(brainpy.state.Synapse):
-    """
-    GABAa synapse model class.
+@register_synapse("ExpSyn")
+class ExpSyn(Synapse):
+    """NEURON-compatible `ExpSyn` template.
 
-    This class implements the dynamics of a GABAa-type synapse using an exponential Euler integration scheme.
-    The synaptic conductance is updated based on presynaptic spike input and time constants.
+    This class follows the dynamics in NEURON's ``expsyn.mod``:
 
-    Args:
-        in_size (brainstate.typing.Size): The input size or shape of the synapse.
-        alpha (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The rise rate constant of the synaptic conductance. Defaults to 0.53 / u.ms.
-        beta (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The decay rate constant of the synaptic conductance. Defaults to 0.18 / u.ms.
-        T (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The synaptic efficacy or scaling factor. Defaults to 1.0.
+    - state: ``g`` in ``uS``
+    - decay: ``g' = -g / tau``
+    - step-boundary event: ``g <- g + weighted_pre_drive``
+    - inward-positive point current: ``I = g * (e - V_post)``
     """
 
-    def __init__(
-        self,
-        in_size: brainstate.typing.Size,
-        alpha: Union[brainstate.typing.ArrayLike, Callable] = 0.53 / u.ms,
-        beta: Union[brainstate.typing.ArrayLike, Callable] = 0.18 / u.ms,
-        T: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
-    ):
-        super().__init__(in_size=in_size)
+    root_type = HHTypedNeuron
+    parameters = {
+        "tau": ParameterSpec(0.1 * u.ms, validator=positive),
+        "e": ParameterSpec(0.0 * u.mV),
+    }
+    states = {"g": StateSpec(0.0 * u.uS)}
+    derived = {}
+    event_input = ScalarEventInput(u.uS, aggregation="sum")
 
-        # parameters
-        self.alpha = braintools.init.param(alpha)
-        self.beta = braintools.init.param(beta)
-        self.T = braintools.init.param(T)
+    def apply_events(self, payload, V_post=None):
+        _ = V_post
+        self.event_input.validate_payload(payload)
+        self.g.value = self.g.value + payload
 
-    def init_state(self, **kwargs):
-        """
-        Initialize the hidden state `g` (synaptic conductance) to zeros.
-        """
-        self.g = brainstate.HiddenState(braintools.init.param(u.math.zeros, self.varshape))
+    def compute_derivative(self, V_post=None):
+        _ = V_post
+        self.g.derivative = -self.g.value / self.tau
 
-    def reset_state(self, **kwargs):
-        """
-        Reset the hidden state `g` (synaptic conductance) to zeros.
-        """
-        self.g.value = braintools.init.param(u.math.zeros, self.varshape)
-
-    def update(self, pre_spike):
-        """
-        Update the synaptic conductance `g` based on the presynaptic spike input.
-
-        The update follows the equation:
-            dg/dt = alpha * pre_spike * T * (1 - g) - beta * g
-
-        Args:
-            pre_spike: Presynaptic spike input.
-
-        Returns:
-            Updated synaptic conductance value.
-        """
-        dg = lambda g: self.alpha * pre_spike * self.T * (1 - g) - self.beta * g
-        self.g.value = brainstate.nn.exp_euler_step(dg, self.g.value)
-        return self.g.value
+    def current(self, V_post):
+        return self.g.value * (self.e - V_post)
 
 
-@register_synapse("NMDA")
-class NMDA(brainpy.state.Synapse):
-    """
-    NMDA synapse model class.
+@register_synapse("Exp2Syn")
+class Exp2Syn(Synapse):
+    """NEURON-compatible `Exp2Syn` template.
 
-    This class implements the dynamics of an NMDA-type synapse using an exponential Euler integration scheme.
-    The synaptic conductance is updated based on presynaptic spike input and multiple time constants.
+    This class follows the dynamics in NEURON's ``exp2syn.mod``:
 
-    Args:
-        in_size (brainstate.typing.Size): The input size or shape of the synapse.
-        alpha1 (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The rise rate constant for the synaptic conductance `g`. Defaults to 2 / ms.
-        beta1 (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The decay rate constant for the synaptic conductance `g`. Defaults to 0.01 / ms.
-        alpha2 (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The rise rate constant for the auxiliary variable `x`. Defaults to 1 / ms.
-        beta2 (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The decay rate constant for the auxiliary variable `x`. Defaults to 0.5 / ms.
-        T (Union[brainstate.typing.ArrayLike, Callable], optional):
-            The synaptic efficacy or scaling factor. Defaults to 1.0.
+    - states: ``A`` and ``B`` in ``uS``
+    - decay: ``A' = -A / tau1``, ``B' = -B / tau2``
+    - conductance: ``g = B - A``
+    - inward-positive point current: ``I = g * (e - V_post)``
+    - step-boundary event: ``A <- A + weighted_pre_drive * factor`` and same for ``B``
     """
 
-    def __init__(
-        self,
-        in_size: brainstate.typing.Size,
-        alpha1: Union[brainstate.typing.ArrayLike, Callable] = 2. / u.ms,
-        beta1: Union[brainstate.typing.ArrayLike, Callable] = 0.01 / u.ms,
-        alpha2: Union[brainstate.typing.ArrayLike, Callable] = 1. / u.ms,
-        beta2: Union[brainstate.typing.ArrayLike, Callable] = 0.5 / u.ms,
-        T: Union[brainstate.typing.ArrayLike, Callable] = 1.0,
-    ):
-        super().__init__(in_size=in_size)
+    root_type = HHTypedNeuron
+    parameters = {
+        "tau1": ParameterSpec(0.1 * u.ms, validator=positive),
+        "tau2": ParameterSpec(10.0 * u.ms, validator=positive),
+        "e": ParameterSpec(0.0 * u.mV),
+    }
+    states = {
+        "A": StateSpec(0.0 * u.uS),
+        "B": StateSpec(0.0 * u.uS),
+    }
+    derived = {"g": DerivedSpec()}
+    event_input = ScalarEventInput(u.uS, aggregation="sum")
 
-        # Initialize model parameters
-        self.alpha1 = braintools.init.param(alpha1)
-        self.beta1 = braintools.init.param(beta1)
-        self.alpha2 = braintools.init.param(alpha2)
-        self.beta2 = braintools.init.param(beta2)
-        self.T = braintools.init.param(T)
+    @classmethod
+    def validate_parameter_values(cls, parameters) -> None:
+        if u.math.any(parameters["tau1"] >= parameters["tau2"]):
+            raise ValueError("Exp2Syn requires tau1 < tau2.")
 
-    def init_state(self, **kwargs):
-        """
-        Initialize the hidden states `g` (synaptic conductance) and `x` (auxiliary variable) to zeros.
-        """
-        self.g = brainstate.HiddenState(braintools.init.param(u.math.zeros, self.varshape))
-        self.x = brainstate.HiddenState(braintools.init.param(u.math.zeros, self.varshape))
+    def _compute_factor(self):
+        tp = (self.tau1 * self.tau2) / (self.tau2 - self.tau1) * u.math.log(u.math.asarray(self.tau2 / self.tau1))
+        factor = -u.math.exp(-(tp / self.tau1)) + u.math.exp(-(tp / self.tau2))
+        return 1.0 / factor
 
-    def reset_state(self, **kwargs):
-        """
-        Reset the hidden states `g` (synaptic conductance) and `x` (auxiliary variable) to zeros.
-        """
-        self.g.value = braintools.init.param(u.math.zeros, self.varshape)
-        self.x.value = braintools.init.param(u.math.zeros, self.varshape)
+    @property
+    def g(self):
+        return self.B.value - self.A.value
 
-    def update(self, pre_spike):
-        """
-        Update the synaptic conductance `g` and auxiliary variable `x` based on the presynaptic spike input.
+    def apply_events(self, payload, V_post=None):
+        _ = V_post
+        self.event_input.validate_payload(payload)
+        delta = payload * self._compute_factor()
+        self.A.value = self.A.value + delta
+        self.B.value = self.B.value + delta
 
-        The updates follow the differential equations:
-            dg/dt = alpha1 * x * (1 - g) - beta1 * g
-            braincell/dt = alpha2 * pre_spike * T * (1 - x) - beta2 * x
+    def compute_derivative(self, V_post=None):
+        _ = V_post
+        self.A.derivative = -self.A.value / self.tau1
+        self.B.derivative = -self.B.value / self.tau2
 
-        Args:
-            pre_spike: Presynaptic spike input.
+    def current(self, V_post):
+        return self.g * (self.e - V_post)
 
-        Returns:
-            Updated synaptic conductance value `g`.
-        """
-        # Define the differential equations for g and x
-        dg = lambda g, x: self.alpha1 * x * (1 - g) - self.beta1 * g
-        dx = lambda x: self.alpha2 * pre_spike * self.T * (1 - x) - self.beta2 * x
-        # Update the hidden states using exponential Euler integration
-        self.g.value = brainstate.nn.exp_euler_step(dg, self.g.value, self.x.value)
-        self.x.value = brainstate.nn.exp_euler_step(dx, self.x.value)
-        return self.g.value
+
+class AMPA(Synapse):
+    """Unavailable legacy receptor model pending an event-model redesign."""
+
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError(_UNAVAILABLE_RECEPTOR_MESSAGE.format(model="AMPA"))
+
+
+class GABAa(Synapse):
+    """Unavailable legacy receptor model pending an event-model redesign."""
+
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError(_UNAVAILABLE_RECEPTOR_MESSAGE.format(model="GABAa"))
+
+
+class NMDA(Synapse):
+    """Unavailable legacy receptor model pending an event-model redesign."""
+
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError(_UNAVAILABLE_RECEPTOR_MESSAGE.format(model="NMDA"))
+
+
+_UNAVAILABLE_RECEPTOR_MESSAGE = (
+    "{model} is temporarily unavailable while its transmitter-pulse and point-current "
+    "contract is redesigned. Use ExpSyn or Exp2Syn for the current event runtime."
+)

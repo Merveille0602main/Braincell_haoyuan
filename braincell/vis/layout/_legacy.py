@@ -30,7 +30,6 @@ can revive them without digging through git log. They are clearly
 quarantined in the "Unused legacy helpers" section below.
 """
 
-
 import brainunit as u
 import numpy as np
 
@@ -62,6 +61,7 @@ from ._geometry import (
 # ---------------------------------------------------------------------------
 # Live legacy layout (still reachable via root_layout='legacy')
 # ---------------------------------------------------------------------------
+
 
 def _build_layout_branches_legacy(
     morpho: Morphology,
@@ -109,37 +109,44 @@ def _layout_children_legacy(
     min_branch_angle_rad: float,
     layout_config: LayoutConfig,
 ) -> None:
-    children = parent.children
-    if not children:
-        return
+    """Lay out every descendant of ``parent``.
 
-    allocations = _allocate_child_regions_legacy(
-        children=children,
-        interval=interval,
-        leaf_counts=leaf_counts,
-        min_branch_angle_rad=min_branch_angle_rad,
-    )
-    parent_layout = layouts[parent.index]
-    for child, child_interval, child_angle in allocations:
-        attach_um, attach_tangent_um = sample_layout_branch(parent_layout, child.parent_x)
-        layouts[child.index] = _make_layout_branch(
-            child,
-            spec=layout_specs[child.index],
-            attach_um=attach_um,
-            attach_angle_rad=_vector_angle_rad(attach_tangent_um),
-            target_angle_rad=child_angle,
-            child_x=float(child.child_x),
-            bend_fraction=layout_config.default_bend_fraction,
-        )
-        _layout_children_legacy(
-            child,
-            layout_specs=layout_specs,
+    Iterative for the same reason as the other layout families: a branch
+    chain deeper than the interpreter's frame limit must not raise
+    ``RecursionError``. A child's region derives from its parent's finished
+    interval alone, so a sibling group can be placed before any of it is
+    descended into. Children are pushed in reverse to keep the
+    left-to-right visit order.
+    """
+    # frame: (branch, angular region allocated to it)
+    stack: list[tuple[MorphoBranch, tuple[float, float]]] = [(parent, interval)]
+    while stack:
+        node, node_interval = stack.pop()
+        children = node.children
+        if not children:
+            continue
+
+        allocations = _allocate_child_regions_legacy(
+            children=children,
+            interval=node_interval,
             leaf_counts=leaf_counts,
-            layouts=layouts,
-            interval=child_interval,
             min_branch_angle_rad=min_branch_angle_rad,
-            layout_config=layout_config,
         )
+        node_layout = layouts[node.index]
+        frames: list[tuple[MorphoBranch, tuple[float, float]]] = []
+        for child, child_interval, child_angle in allocations:
+            attach_um, attach_tangent_um = sample_layout_branch(node_layout, child.parent_x)
+            layouts[child.index] = _make_layout_branch(
+                child,
+                spec=layout_specs[child.index],
+                attach_um=attach_um,
+                attach_angle_rad=_vector_angle_rad(attach_tangent_um),
+                target_angle_rad=child_angle,
+                child_x=float(child.child_x),
+                bend_fraction=layout_config.default_bend_fraction,
+            )
+            frames.append((child, child_interval))
+        stack.extend(reversed(frames))
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +159,7 @@ def _layout_children_legacy(
 # so the git blame stays meaningful if someone needs to revive the
 # corresponding feature. If you're adding code, prefer the stem /
 # balloon / radial families instead of calling into this section.
+
 
 def _assign_group_trunk_first_angles(
     children: tuple[MorphoBranch, ...],
@@ -238,9 +246,8 @@ def _make_layout_branch_to_y(
 
     raw_segment_points_um = np.zeros((len(spec.segment_lengths_um) + 1, 2), dtype=float)
     for segment_index in range(len(spec.segment_lengths_um)):
-        raw_segment_points_um[segment_index + 1] = (
-            raw_segment_points_um[segment_index]
-            + np.array([dx_segments_um[segment_index], dy_segments_um[segment_index]], dtype=float)
+        raw_segment_points_um[segment_index + 1] = raw_segment_points_um[segment_index] + np.array(
+            [dx_segments_um[segment_index], dy_segments_um[segment_index]], dtype=float
         )
 
     raw_layout = _layout_branch_from_points(branch, spec, raw_segment_points_um)
@@ -267,8 +274,7 @@ def _dendrogram_y_units_by_branch(
 ) -> tuple[dict[int, float], dict[int, float]]:
     ordered_leaves = _ordered_leaf_branches(root, root_layout=root_layout)
     leaf_positions = {
-        leaf.index: float(position - (len(ordered_leaves) - 1) / 2.0)
-        for position, leaf in enumerate(ordered_leaves)
+        leaf.index: float(position - (len(ordered_leaves) - 1) / 2.0) for position, leaf in enumerate(ordered_leaves)
     }
     branch_positions: dict[int, float] = {}
 

@@ -1,3 +1,18 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Unit tests for :mod:`braincell._multi_compartment.probes`.
 
 Full probe-sampling flows require an initialized ``Cell`` and are
@@ -13,6 +28,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from braincell._multi_compartment.probes import (
+    _probe_attr_value,
     _pack_probe_samples,
     _select_last_axis,
     sample_probe,
@@ -46,6 +62,22 @@ class TestPackProbeSamples(unittest.TestCase):
         out = _pack_probe_samples(samples)
         self.assertTrue(hasattr(out, "unit"))
         np.testing.assert_allclose(out.to_decimal(u.mV), [1.0, 2.0, 3.0])
+
+
+class TestProbeAttrValue(unittest.TestCase):
+    def test_state_field_returns_value(self):
+        class _Owner:
+            x = brainstate.ShortTermState(jnp.asarray([1.0, 2.0]))
+
+        out = _probe_attr_value(_Owner(), "x", probe_name="p")
+        np.testing.assert_allclose(np.asarray(out), [1.0, 2.0])
+
+    def test_plain_field_returns_raw_value(self):
+        class _Owner:
+            y = jnp.asarray([3.0, 4.0])
+
+        out = _probe_attr_value(_Owner(), "y", probe_name="p")
+        np.testing.assert_allclose(np.asarray(out), [3.0, 4.0])
 
 
 class TestPublicHelpersExist(unittest.TestCase):

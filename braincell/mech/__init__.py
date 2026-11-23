@@ -29,7 +29,7 @@ The :mod:`braincell.mech` package is purely declarative: it describes
   :class:`Point` and its concrete subclasses :class:`CurrentClamp`,
   :class:`SineClamp`, :class:`FunctionClamp`, :class:`StateProbe`,
   :class:`MechanismProbe`, :class:`CurrentProbe`, :class:`ProbeMechanism`, and
-  :class:`Synapse`. :class:`Junction` is the gap-junction point
+  :class:`SynapseSpec`. :class:`Junction` is the gap-junction point
   declaration and lives in :mod:`braincell.mech._junction`.
 
 Passive cable properties are recorded via :class:`CableProperty`.
@@ -51,8 +51,9 @@ braincell.synapse : Concrete synapse implementations.
 
 from ._base import Mechanism
 from ._cable import CableProperty
+from ._context import CVContext
 from ._density import Channel, Density, Ion
-from ._junction import Junction
+from ._junction import Junction, JunctionEndpoint
 from ._params import Params
 from ._point import (
     CurrentProbe,
@@ -64,7 +65,9 @@ from ._point import (
     SineClamp,
     StateProbe,
     Synapse,
+    SynapseSpec,
 )
+from braincell.event import NetStim
 from ._registry import (
     MechanismEntry,
     MechanismRegistry,
@@ -79,6 +82,7 @@ __all__ = [
     "Mechanism",
     # Cable properties
     "CableProperty",
+    "CVContext",
     # Density mechanisms
     "Channel",
     "Density",
@@ -90,12 +94,15 @@ __all__ = [
     "CurrentClamp",
     "FunctionClamp",
     "Junction",
+    "JunctionEndpoint",
     "MechanismProbe",
+    "NetStim",
     "Point",
     "ProbeMechanism",
     "SineClamp",
     "StateProbe",
     "Synapse",
+    "SynapseSpec",
     # Registry
     "MechanismEntry",
     "MechanismRegistry",

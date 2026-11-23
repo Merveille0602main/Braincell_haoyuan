@@ -14,7 +14,7 @@
 # ==============================================================================
 
 import functools
-from typing import Dict
+from typing import Callable, Dict
 
 import brainstate
 import brainunit as u
@@ -23,7 +23,7 @@ import jax.numpy as jnp
 from jax.scipy.linalg import expm
 
 from braincell._misc import set_module_as
-from braincell._typing import Path
+from braincell._typing import ArrayLike, Path
 from .protocol import DiffEqModule
 from ._registry import register_integrator
 from ._util import (
@@ -56,6 +56,7 @@ def power_iteration_expm(A, num_steps=20, method='scipy'):
         return result
     else:
         raise ValueError('Unsupported method "{}"'.format(method))
+
 
 def _exponential_euler(f, y0, t, dt, args=()):
     dtype = y0.dtype
@@ -183,11 +184,9 @@ def exp_euler_step(target: DiffEqModule, *args):
     from braincell._base import HHTypedNeuron
     from braincell._multi_compartment import Cell
     from braincell._single_compartment import SingleCompartment
+
     if not isinstance(target, HHTypedNeuron):
-        raise TypeError(
-            f"The target should be a {HHTypedNeuron.__name__}. "
-            f"But got {type(target)} instead."
-        )
+        raise TypeError(f"The target should be a {HHTypedNeuron.__name__}. But got {type(target)} instead.")
     t = brainstate.environ.get('t', getattr(target, 'current_time', 0.0 * u.ms))
     dt = brainstate.environ.get('dt')
 
@@ -198,7 +197,7 @@ def exp_euler_step(target: DiffEqModule, *args):
             t,
             dt,
             *args,
-            merging='stack'  # [n_neuron, n_state]
+            merging='stack',  # [n_neuron, n_state]
         )
 
     elif isinstance(target, Cell):
@@ -208,7 +207,7 @@ def exp_euler_step(target: DiffEqModule, *args):
             t,
             dt,
             *args,
-            merging='concat'  # [n_neuron, n_compartment * n_state]
+            merging='concat',  # [n_neuron, n_compartment * n_state]
         )
 
     else:
@@ -313,26 +312,65 @@ def ind_exp_euler_step(target: DiffEqModule, *args, excluded_paths=()):
         ...         excluded_paths=[('V',)],
         ...     )                                           # doctest: +SKIP
     """
+    _ind_exp_euler_step_selected(
+        target,
+        *args,
+        excluded_paths=excluded_paths,
+        allow_empty=True,
+    )
+
+
+def _has_path_prefix(path, prefixes):
+    for prefix in prefixes:
+        if path[: len(prefix)] == prefix:
+            return True
+    return False
+
+
+def _ind_exp_euler_step_selected(
+    target: DiffEqModule,
+    *args,
+    include_paths=(),
+    excluded_paths=(),
+    pre_integral: Callable | None = None,
+    compute_derivative: Callable | None = None,
+    post_integral: Callable | None = None,
+    allow_empty: bool = False,
+):
+    """Internal selective variant used by family-phased cell scheduling."""
     if not isinstance(target, DiffEqModule):
-        raise TypeError(
-            f"The target should be a {DiffEqModule.__name__}. "
-            f"But got {type(target)} instead."
-        )
+        raise TypeError(f"The target should be a {DiffEqModule.__name__}. But got {type(target)} instead.")
     t = brainstate.environ.get('t', getattr(target, 'current_time', 0.0 * u.ms))
     dt = brainstate.environ.get('dt')
 
-    # Pre-integration hook (e.g., update gating variables)
-    target.pre_integral(*args)
-
     # Retrieve all states from the target module
-    all_states, diffeq_states, other_states = split_diffeq_states(target)
+    excluded_paths = tuple(tuple(path) for path in excluded_paths)
+    include_paths = tuple(tuple(path) for path in include_paths)
+    all_states, diffeq_states, other_states = split_diffeq_states(
+        target,
+        excluded_paths=excluded_paths,
+    )
+    if include_paths:
+        diffeq_states = {
+            key: state for key, state in diffeq_states.items() if _has_path_prefix(tuple(key), include_paths)
+        }
+    if len(diffeq_states) == 0:
+        if allow_empty:
+            return
+        raise AssertionError("No DiffEqState found in the target module.")
 
     # Collect all state object ids for trace validation
     all_state_ids = {id(st) for st in all_states.values()}
+    pre_integral = target.pre_integral if pre_integral is None else pre_integral
+    compute_derivative = target.compute_derivative if compute_derivative is None else compute_derivative
+    post_integral = target.post_integral if post_integral is None else post_integral
+
+    # Pre-integration hook (e.g., update gating variables)
+    pre_integral(*args)
 
     def vector_field(
         diffeq_state_key: Path,
-        diffeq_state_val: brainstate.typing.ArrayLike,
+        diffeq_state_val: ArrayLike,
         other_diffeq_state_vals: Dict,
         other_state_vals: Dict,
     ):
@@ -372,7 +410,7 @@ def ind_exp_euler_step(target: DiffEqModule, *args, excluded_paths=()):
                 all_states[key].value = val
 
             # Compute derivatives for all states
-            target.compute_derivative(*args)
+            compute_derivative(*args)
 
             # Validate and retrieve the derivative for the current state
             _check_diffeq_state_derivative(all_states[diffeq_state_key], dt)  # THIS is important.
@@ -390,7 +428,6 @@ def ind_exp_euler_step(target: DiffEqModule, *args, excluded_paths=()):
     # Prepare dictionaries of current state values
     other_state_vals = {k: v.value for k, v in other_states.items()}
     diffeq_state_vals = {k: v.value for k, v in diffeq_states.items()}
-    assert len(diffeq_states) > 0, "No DiffEqState found in the target module."
 
     # data to capture the integrated values of DiffEqStates
     integrated_diffeq_state_vals = dict()
@@ -398,9 +435,6 @@ def ind_exp_euler_step(target: DiffEqModule, *args, excluded_paths=()):
     # Iterate over each DiffEqState and apply the exponential Euler update independently
     i = 0
     for key in diffeq_states.keys():
-        if key in excluded_paths:
-            continue
-
         # Compute the linearization (Jacobian), derivative, and auxiliary outputs
         linear, derivative, aux = brainstate.transform.vector_grad(
             functools.partial(vector_field, key),
@@ -414,8 +448,15 @@ def ind_exp_euler_step(target: DiffEqModule, *args, excluded_paths=()):
             other_state_vals,  # Other state values
         )
 
-        # Convert linearization to a unit-aware quantity
-        linear = u.Quantity(u.get_mantissa(linear), u.get_unit(derivative) / u.get_unit(linear))
+        # Convert df/dx back to a unit-aware quantity.  With
+        # ``unit_aware=False`` the gradient mantissa is returned without a
+        # reliable physical unit, so reconstruct it from the derivative and
+        # state units.  This keeps ``dt * linear`` dimensionless.
+        state_value = diffeq_state_vals[key]
+        linear = u.Quantity(
+            u.get_mantissa(linear),
+            u.get_unit(derivative) / u.get_unit(state_value),
+        )
 
         # Compute the exponential relative function phi(dt * linear)
         phi = u.math.exprel(dt * linear)
@@ -431,9 +472,7 @@ def ind_exp_euler_step(target: DiffEqModule, *args, excluded_paths=()):
 
     # Assign the integrated values back to the corresponding DiffEqStates
     for k, st in diffeq_states.items():
-        if k in excluded_paths:
-            continue
         st.value = integrated_diffeq_state_vals[k]
 
     # Post-integration hook (e.g., apply constraints)
-    target.post_integral(*args)
+    post_integral(*args)

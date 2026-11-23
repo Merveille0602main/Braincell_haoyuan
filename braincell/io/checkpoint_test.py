@@ -42,9 +42,7 @@ from braincell.io import (
     save_morpho,
 )
 from braincell.io import checkpoint as checkpoint_module
-
-
-FIXTURE_DIR = Path(__file__).resolve().parents[2] / "examples" / "multi_compartment" / "morpho_files"
+from braincell.io._testing import FIXTURE_DIR
 
 
 def _make_lengths_branch(*, type: str = "dendrite") -> Branch:
@@ -56,14 +54,17 @@ def _make_lengths_branch(*, type: str = "dendrite") -> Branch:
 
 
 def _make_points_branch(*, type: str = "axon") -> Branch:
-    pts = np.array(
-        [
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [10.0, 20.0, 0.0],
-            [10.0, 20.0, 30.0],
-        ]
-    ) * u.um
+    pts = (
+        np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [10.0, 20.0, 0.0],
+                [10.0, 20.0, 30.0],
+            ]
+        )
+        * u.um
+    )
     return Branch.from_points(points=pts, radii=[2.0, 1.5, 1.0, 0.5] * u.um, type=type)
 
 
@@ -229,9 +230,7 @@ class CheckpointMorphoRoundTripTest(unittest.TestCase):
 
     def test_round_trip_simple_morpho(self) -> None:
         soma = Branch.from_lengths(lengths=[20.0] * u.um, radii=[10.0, 10.0] * u.um, type="soma")
-        dend = Branch.from_lengths(
-            lengths=[50.0] * u.um, radii=[2.0, 1.0] * u.um, type="dendrite"
-        )
+        dend = Branch.from_lengths(lengths=[50.0] * u.um, radii=[2.0, 1.0] * u.um, type="dendrite")
         morpho = Morphology.from_root(soma, name="soma")
         morpho.soma.dendrite = dend
 
@@ -270,9 +269,7 @@ class CheckpointMorphoRoundTripTest(unittest.TestCase):
         for _ in range(3):
             morpho.attach(
                 parent="soma",
-                child_branch=Branch.from_lengths(
-                    lengths=[10.0] * u.um, radii=[1.0, 0.5] * u.um, type="dendrite"
-                ),
+                child_branch=Branch.from_lengths(lengths=[10.0] * u.um, radii=[1.0, 0.5] * u.um, type="dendrite"),
             )
         # Auto-naming has produced dendrite_0, dendrite_1, dendrite_2.
         self.assertEqual(morpho.branch(index=3).name, "dendrite_2")
@@ -285,9 +282,7 @@ class CheckpointMorphoRoundTripTest(unittest.TestCase):
         # Next auto-attached dendrite must continue the sequence at _3.
         new_view = loaded.attach(
             parent="soma",
-            child_branch=Branch.from_lengths(
-                lengths=[5.0] * u.um, radii=[1.0, 0.5] * u.um, type="dendrite"
-            ),
+            child_branch=Branch.from_lengths(lengths=[5.0] * u.um, radii=[1.0, 0.5] * u.um, type="dendrite"),
         )
         self.assertEqual(new_view.name, "dendrite_3")
 

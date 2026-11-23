@@ -25,10 +25,7 @@ registered in :mod:`braincell.quad._registry`.
     integrator registry at import time via ``@register_integrator``. Do
     not lazily defer these imports — unresolved solver names would
     surface as ``ValueError: unknown integrator`` from
-    :func:`get_integrator` at first call instead of at import time. The
-    lazy-import pattern in :mod:`braincell.quad._diffrax` refers only to
-    the third-party ``diffrax`` dependency, not to the backend module
-    itself.
+    :func:`get_integrator` at first call instead of at import time.
 """
 
 from typing import Callable, Mapping
@@ -36,20 +33,6 @@ from typing import Callable, Mapping
 # Importing the step modules below has the side effect of populating the
 # global registry via @register_integrator decorators on each *_step function.
 from ._backward_euler import backward_euler_step
-from ._diffrax import (
-    diffrax_bosh3_step,
-    diffrax_bwd_euler_step,
-    diffrax_dopri5_step,
-    diffrax_dopri8_step,
-    diffrax_euler_step,
-    diffrax_heun_step,
-    diffrax_kvaerno3_step,
-    diffrax_kvaerno4_step,
-    diffrax_kvaerno5_step,
-    diffrax_midpoint_step,
-    diffrax_ralston_step,
-    diffrax_tsit5_step,
-)
 from ._exp_euler import (
     exp_euler_step,
     ind_exp_euler_step,
@@ -64,9 +47,14 @@ from ._implicit import (
     splitting_step,
 )
 from .protocol import (
+    DiffEqGroupState,
     DiffEqModule,
+    DiffEqSingleState,
     DiffEqState,
     IndependentIntegration,
+    state,
+    hidden_state,
+    state_grouping,
 )
 from ._registry import (
     IntegratorEntry,
@@ -97,14 +85,11 @@ __all__ = [
     'IntegratorEntry',
     'IntegratorRegistry',
     'all_integrators',
-
     # implicit backward Euler
     'backward_euler_step',
-
     # exponential Euler
     'exp_euler_step',
     'ind_exp_euler_step',
-
     # runge-kutta methods
     'euler_step',
     'midpoint_step',
@@ -117,26 +102,8 @@ __all__ = [
     'ralston3_step',
     'rk4_step',
     'ralston4_step',
-
-    # diffrax explicit methods
-    'diffrax_euler_step',
-    'diffrax_heun_step',
-    'diffrax_midpoint_step',
-    'diffrax_ralston_step',
-    'diffrax_bosh3_step',
-    'diffrax_tsit5_step',
-    'diffrax_dopri5_step',
-    'diffrax_dopri8_step',
-
-    # diffrax implicit methods
-    'diffrax_bwd_euler_step',
-    'diffrax_kvaerno3_step',
-    'diffrax_kvaerno4_step',
-    'diffrax_kvaerno5_step',
-
     # staggered
     'staggered_step',
-
     # implicit methods
     'implicit_euler_step',
     'splitting_step',
@@ -145,12 +112,15 @@ __all__ = [
     'cn_rk4_step',
     'cn_exp_euler_step',
     'exp_exp_euler_step',
-
     # protocol
     'DiffEqState',
+    'DiffEqSingleState',
+    'DiffEqGroupState',
     'DiffEqModule',
     'IndependentIntegration',
-
+    'state',
+    'hidden_state',
+    'state_grouping',
 ]
 
 
@@ -240,10 +210,5 @@ def get_integrator(method: str | Callable) -> Callable:
             suggestions = registry.suggest(method, n=1)
             hint = f" Did you mean {suggestions[0]!r}?" if suggestions else ""
             available = ", ".join(registry.names())
-            raise ValueError(
-                f"Unknown integrator {method!r}.{hint} "
-                f"Available: {available}."
-            )
-    raise TypeError(
-        f"Integrator method must be a string or callable, got {type(method).__name__}."
-    )
+            raise ValueError(f"Unknown integrator {method!r}.{hint} Available: {available}.")
+    raise TypeError(f"Integrator method must be a string or callable, got {type(method).__name__}.")

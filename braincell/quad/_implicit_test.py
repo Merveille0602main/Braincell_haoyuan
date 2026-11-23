@@ -44,7 +44,7 @@ from braincell.quad import (
 )
 from braincell.quad.protocol import (
     DiffEqModule,
-    DiffEqState,
+    DiffEqSingleState,
 )
 
 _FLOAT_DTYPE = jnp.asarray(0.0).dtype
@@ -56,7 +56,7 @@ class _LinearDecay(brainstate.nn.Module, DiffEqModule):
     def __init__(self, x0=1.0, tau_ms=10.0, shape=(3,)):
         super().__init__()
         self.tau = tau_ms * u.ms
-        self.x = DiffEqState(jnp.full(shape, x0, dtype=_FLOAT_DTYPE) * u.mV)
+        self.x = DiffEqSingleState(jnp.full(shape, x0, dtype=_FLOAT_DTYPE) * u.mV)
 
     def compute_derivative(self, *args, **kwargs):
         self.x.derivative = -self.x.value / self.tau
@@ -67,8 +67,8 @@ class ImplicitEulerLinearTest(unittest.TestCase):
 
     def test_one_step_lies_in_cn_bracket(self):
         m = _LinearDecay()
-        with brainstate.environ.context(t=0. * u.ms, dt=0.1 * u.ms):
-            implicit_euler_step(m, 0. * u.ms, 0.1 * u.ms)
+        with brainstate.environ.context(t=0.0 * u.ms, dt=0.1 * u.ms):
+            implicit_euler_step(m, 0.0 * u.ms, 0.1 * u.ms)
         v = float(m.x.value.to_decimal(u.mV)[0])
         # The 1-step Crank-Nicolson value lies between the implicit-Euler
         # value 1/(1 + dt/tau) ≈ 0.99010 and the exact decay exp(-dt/tau)
@@ -112,9 +112,7 @@ class ImplicitMethodRegistrationTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(registry.entry(name).category, "implicit")
         # exp_exp_euler is grouped with the exponential family.
-        self.assertEqual(
-            registry.entry("exp_exp_euler").category, "exponential"
-        )
+        self.assertEqual(registry.entry("exp_exp_euler").category, "exponential")
 
 
 if __name__ == "__main__":

@@ -25,16 +25,192 @@ before executing its own bottom-of-file ``from ._base_ion import ...``
 re-export line.
 """
 
+import os
 from typing import Callable, Dict, Hashable, Optional, Sequence, Tuple, Type
 
 import brainstate
+import brainunit as u
+import jax
 from brainstate.mixin import _JointGenericAlias
 
+from braincell._typing import Size
 from ._base_channel import Channel, IonChannel, IonInfo
 from ._misc import Container, set_module_as
 from .quad.protocol import IndependentIntegration
 
 __all__ = ["Ion", "MixIons", "mix_ions"]
+
+
+def _channel_current_owner_specs(node):
+    """Return current-owner specs declared by a channel.
+
+    Parameters
+    ----------
+    node : Channel
+        Channel instance whose current-owner declaration should be
+        interpreted.
+
+    Returns
+    -------
+    tuple of tuple
+        A tuple of ``(component_key, owner_type)`` pairs. A
+        ``component_key`` of ``None`` denotes the legacy single-owner
+        path where the owner current is the channel's ``current(...)``
+        return value. Non-``None`` keys denote component names resolved
+        through ``current_components(...)``.
+
+    Notes
+    -----
+    Existing channels normally declare ``current_owner_type`` and are
+    returned as a single legacy owner. Channels that write more than one
+    ion current may declare ``current_owner_types`` as a mapping from
+    component key to owner ion type. Those channels must also implement
+    ``current_components(...)``.
+    """
+    owners = getattr(node, "current_owner_types", None)
+    if owners is not None:
+        return tuple((key, owner_type) for key, owner_type in owners.items())
+    owner = getattr(node, "current_owner_type", None)
+    if owner is not None:
+        return ((None, owner),)
+    return ()
+
+
+def _channel_component_current(node, component_key, V, *infos):
+    """Return total or component current for one channel.
+
+    Parameters
+    ----------
+    node : Channel
+        Channel instance being evaluated.
+    component_key : str or None
+        Component key to read from ``node.current_components(...)``.
+        ``None`` selects the legacy total-current path and calls
+        ``node.current(...)`` directly.
+    V : array-like
+        Membrane potential passed to the channel.
+    *infos
+        Ion information objects passed to the channel.
+
+    Returns
+    -------
+    array-like
+        Current density returned by the channel for the requested owner.
+
+    Raises
+    ------
+    AttributeError
+        If ``component_key`` is not ``None`` and the channel does not
+        implement ``current_components(...)``.
+    KeyError
+        If the requested component key is absent from the returned
+        component mapping.
+
+    Notes
+    -----
+    ``current(...)`` remains the total membrane current API. Component
+    lookup is used only when a channel explicitly declares multiple
+    current owners through ``current_owner_types``.
+    """
+    if component_key is None:
+        return jax.named_call(
+            node.current,
+            name=_channel_call_name("braincell:ion_current:channel", node),
+        )(V, *infos)
+    components = jax.named_call(
+        node.current_components,
+        name=_channel_call_name("braincell:ion_current:components", node),
+    )(V, *infos)
+    return components[component_key]
+
+
+def _channel_call_name(prefix: str, node) -> str:
+    """Build a profiler-safe ``jax.named_call`` name for an ion child channel."""
+    class_name = type(getattr(node, "_channel", node)).__name__
+    raw = f"{prefix}:{class_name}"
+    return "".join(ch if ch.isalnum() or ch in ":_" else "_" for ch in raw)[:180]
+
+
+def _external_current_call_name(prefix: str, key) -> str:
+    """Build a profiler-safe ``jax.named_call`` name for external ion current."""
+    raw = f"{prefix}:{key!s}"
+    return "".join(ch if ch.isalnum() or ch in ":_" else "_" for ch in raw)[:180]
+
+
+def _profile_barrier_current(current):
+    """Optionally split channel-current HLO for profiler attribution.
+
+    The barrier is disabled by default because it can inhibit XLA fusion. Set
+    ``BRAINCELL_PROFILE_SPLIT_CURRENTS=1`` when collecting profiler traces that
+    need per-channel current attribution.
+    """
+    if os.environ.get("BRAINCELL_PROFILE_SPLIT_CURRENTS") != "1":
+        return current
+    if hasattr(current, "unit"):
+        return u.Quantity(jax.lax.optimization_barrier(u.get_mantissa(current)), current.unit)
+    return jax.lax.optimization_barrier(current)
+
+
+def _mask_inactive_current(current, point_mask):
+    """Zero inactive points in a channel current.
+
+    Parameters
+    ----------
+    current : array-like
+        Current density returned by a channel. May be a
+        :class:`brainunit.Quantity`.
+    point_mask : array-like of bool
+        Legacy-named boolean mask whose ``True`` entries mark active density CV rows.
+
+    Returns
+    -------
+    array-like
+        Current with inactive points replaced by zero while preserving
+        units when ``current`` is a :class:`brainunit.Quantity`.
+
+    Notes
+    -----
+    Dense density layouts store full CV-shaped state and use masks to disable
+    CVs outside the painted region. This helper keeps inactive rows from
+    contributing to ion-current totals.
+    """
+    if isinstance(current, u.Quantity):
+        unit = current.unit
+        mantissa = u.math.asarray(current.to_decimal(unit))
+        return u.Quantity(u.math.where(point_mask, mantissa, 0.0), unit)
+    return u.math.where(point_mask, current, 0.0)
+
+
+def _safe_inactive_voltage(V, point_mask):
+    """Replace inactive-point voltages with a benign value.
+
+    Parameters
+    ----------
+    V : array-like
+        Membrane potential passed to a channel. May be a
+        :class:`brainunit.Quantity`.
+    point_mask : array-like of bool
+        Legacy-named boolean mask whose ``True`` entries mark active density CV rows.
+
+    Returns
+    -------
+    array-like
+        Voltage with inactive entries replaced by ``-65 mV`` while
+        preserving units when ``V`` is a :class:`brainunit.Quantity`.
+
+    Notes
+    -----
+    The returned value is used only to evaluate channel formulas at
+    inactive points before their current is masked to zero. It prevents
+    inactive points with arbitrary voltages from producing numerical
+    overflow in voltage-dependent rate expressions.
+    """
+    if isinstance(V, u.Quantity):
+        unit = V.unit
+        mantissa = u.math.asarray(V.to_decimal(unit))
+        safe = (-65.0 * u.mV).to_decimal(unit)
+        return u.Quantity(u.math.where(point_mask, mantissa, safe), unit)
+    return u.math.where(point_mask, V, -65.0)
 
 
 class Ion(IonChannel, Container):
@@ -46,33 +222,27 @@ class Ion(IonChannel, Container):
     and Container, allowing it to handle ion-specific behaviors and contain multiple
     channel instances.
 
-    Args:
-        size (brainstate.typing.Size): The size of the simulation target, typically
-            representing the number of neurons or compartments.
-        name (Optional[str]): The name of the Ion instance. Defaults to None.
-        **channels: Additional keyword arguments for specifying Channel instances
-            to be included in this Ion object.
-
-    Attributes:
-        channels (Dict[str, Channel]): A dictionary of Channel instances associated
-            with this ion.
-
     The Ion class serves as a crucial component in modeling the behavior of specific
     ion types within a neuron or neural network simulation. It manages the collective
     behavior of multiple ion channels of the same ion type and provides methods for
     initializing, updating, and querying the state of these channels throughout the
     simulation process.
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     size : brainstate.typing.Size
-        The size of the ion channel, typically representing the number of
+        The size of the simulation target, typically representing the number of
         neurons or compartments.
     name : Optional[str], default=None
         The name of the Ion instance. If not provided, the instance will be unnamed.
-    **channels
-        Additional keyword arguments for specifying Channel instances to be
-        included in this Ion object.
+    channels
+        Additional keyword arguments (``**channels``) specifying Channel instances
+        to be included in this Ion object.
+
+    Attributes
+    ----------
+    channels : Dict[str, Channel]
+        A dictionary of Channel instances associated with this ion.
     """
 
     __module__ = 'braincell'
@@ -81,12 +251,7 @@ class Ion(IonChannel, Container):
     # root_type is assigned below after the import-cycle with HHTypedNeuron
     # is safe to resolve. See module docstring.
 
-    def __init__(
-        self,
-        size: brainstate.typing.Size,
-        name: Optional[str] = None,
-        **channels
-    ) -> None:
+    def __init__(self, size: Size, name: Optional[str] = None, **channels) -> None:
         super().__init__(size, name=name)
         self.channels: Dict[str, Channel] = dict()
         self.channels.update(self._format_elements(Channel, **channels))
@@ -104,7 +269,7 @@ class Ion(IonChannel, Container):
         """
         return self._external_currents
 
-    def pre_integral(self, V):
+    def pre_integral(self, V, recursive_child: bool = True):
         """
         Perform pre-integration operations for all channels.
 
@@ -114,12 +279,15 @@ class Ion(IonChannel, Container):
         Parameters:
             V (array-like): The membrane potential for all neurons/compartments.
         """
+        self._run_ion_hook("_ion_pre_integral_hook", V)
+        if not recursive_child:
+            return
         nodes = brainstate.graph.nodes(self, Channel, allowed_hierarchy=(1, 1))
         for node in nodes.values():
             if not isinstance(node, IndependentIntegration):
                 node.pre_integral(V, self.pack_info())
 
-    def compute_derivative(self, V):
+    def compute_derivative(self, V, recursive_child: bool = True):
         """
         Compute derivatives for all channels.
 
@@ -130,13 +298,14 @@ class Ion(IonChannel, Container):
         """
         nodes = tuple(brainstate.graph.nodes(self, Channel, allowed_hierarchy=(1, 1)).values())
         self.check_hierarchies(type(self), *nodes)
-        ion_info = self.pack_info()
-        for node in nodes:
-            if not isinstance(node, IndependentIntegration):
-                node.compute_derivative(V, ion_info)
+        if recursive_child:
+            ion_info = self.pack_info()
+            for node in nodes:
+                if not isinstance(node, IndependentIntegration):
+                    node.compute_derivative(V, ion_info)
         self._run_ion_hook("_ion_compute_derivative_hook", V)
 
-    def post_integral(self, V):
+    def post_integral(self, V, recursive_child: bool = True):
         """
         Perform post-integration operations for all channels.
 
@@ -146,10 +315,12 @@ class Ion(IonChannel, Container):
         Parameters:
             V (array-like): The membrane potential for all neurons/compartments.
         """
-        nodes = brainstate.graph.nodes(self, Channel, allowed_hierarchy=(1, 1))
-        for node in nodes.values():
-            if not isinstance(node, IndependentIntegration):
-                node.post_integral(V, self.pack_info())
+        if recursive_child:
+            nodes = brainstate.graph.nodes(self, Channel, allowed_hierarchy=(1, 1))
+            for node in nodes.values():
+                if not isinstance(node, IndependentIntegration):
+                    node.post_integral(V, self.pack_info())
+        self._run_ion_hook("_ion_post_integral_hook", V)
 
     def current(self, V, include_external: bool = False):
         """
@@ -171,12 +342,24 @@ class Ion(IonChannel, Container):
         if len(nodes) > 0:
             for node in nodes:
                 node: Channel
-                new_current = node.current(V, ion_info)
+                point_mask = getattr(node, "_point_mask", None)
+                node_V = _safe_inactive_voltage(V, point_mask) if point_mask is not None else V
+                new_current = jax.named_call(
+                    node.current,
+                    name=_channel_call_name("braincell:ion_current:channel", node),
+                )(node_V, ion_info)
+                new_current = _profile_barrier_current(new_current)
+                if point_mask is not None:
+                    new_current = _mask_inactive_current(new_current, point_mask)
                 current = new_current if current is None else (current + new_current)
         if include_external and self._external_currents:
             for key, node in self._external_currents.items():
                 node: Callable
-                contrib = node(V, ion_info)
+                contrib = jax.named_call(
+                    node,
+                    name=_external_current_call_name("braincell:ion_current:external", key),
+                )(V, ion_info)
+                contrib = _profile_barrier_current(contrib)
                 current = contrib if current is None else (current + contrib)
         return current
 
@@ -196,7 +379,7 @@ class Ion(IonChannel, Container):
         ion_info = self.pack_info()
         for node in nodes:
             node: Channel
-            node.init_state(V, ion_info, batch_size)
+            node.init_state(V, ion_info, batch_size=batch_size)
 
     def reset_state(self, V, batch_size: int = None):
         """
@@ -214,12 +397,18 @@ class Ion(IonChannel, Container):
         ion_info = self.pack_info()
         for node in nodes:
             node: Channel
-            node.reset_state(V, ion_info, batch_size)
+            node.reset_state(V, ion_info, batch_size=batch_size)
 
-    def update(self, V, *args, **kwargs):
+    def ind_update(self, V, *args, recursive_child: bool = True, **kwargs):
+        if isinstance(self, IndependentIntegration):
+            self.make_integration(V, recursive_child=recursive_child)
+
+        if not recursive_child:
+            return
+
         ion_info = self.pack_info()
         for key, node in brainstate.graph.nodes(self, Channel, allowed_hierarchy=(1, 1)).items():
-            node.update(V, ion_info)
+            node.ind_update(V, ion_info)
 
     def _run_ion_hook(self, name: str, *args, **kwargs):
         hook = getattr(self, name, None)
@@ -322,6 +511,7 @@ class MixIons(IonChannel, Container):
         AssertionError: If fewer than two ions are provided, if any provided ion is not an Ion instance,
                         or if the sizes of all provided ions are not identical.
     """
+
     __module__ = 'braincell'
 
     # root_type assigned below after import-cycle is safe to resolve.
@@ -372,16 +562,21 @@ class MixIons(IonChannel, Container):
         nodes = tuple(brainstate.graph.nodes(self, Channel, allowed_hierarchy=(1, 1)).values())
 
         if len(nodes) == 0:
-            return 0.
+            return 0.0
         else:
             current = None
             for node in nodes:
                 infos = tuple([self._get_ion(root).pack_info() for root in node.root_type.__args__])
-                current = (
-                    node.current(V, *infos)
-                    if current is None else
-                    (current + node.current(V, *infos))
-                )
+                point_mask = getattr(node, "_point_mask", None)
+                node_V = _safe_inactive_voltage(V, point_mask) if point_mask is not None else V
+                new_current = jax.named_call(
+                    node.current,
+                    name=_channel_call_name("braincell:mix_ion_current:channel", node),
+                )(node_V, *infos)
+                new_current = _profile_barrier_current(new_current)
+                if point_mask is not None:
+                    new_current = _mask_inactive_current(new_current, point_mask)
+                current = new_current if current is None else (current + new_current)
             return current
 
     def init_state(self, V, batch_size: int = None):
@@ -390,18 +585,18 @@ class MixIons(IonChannel, Container):
         for node in nodes:
             node: Channel
             infos = tuple([self._get_ion(root).pack_info() for root in node.root_type.__args__])
-            node.init_state(V, *infos, batch_size)
+            node.init_state(V, *infos, batch_size=batch_size)
 
     def reset_state(self, V, batch_size=None):
         nodes = tuple(brainstate.graph.nodes(self, Channel, allowed_hierarchy=(1, 1)).values())
         for node in nodes:
             infos = tuple([self._get_ion(root).pack_info() for root in node.root_type.__args__])
-            node.reset_state(V, *infos, batch_size)
+            node.reset_state(V, *infos, batch_size=batch_size)
 
-    def update(self, V, *args, **kwargs):
+    def ind_update(self, V, *args, **kwargs):
         for key, node in brainstate.graph.nodes(self, Channel, allowed_hierarchy=(1, 1)).items():
             infos = tuple([self._get_ion(root).pack_info() for root in node.root_type.__args__])
-            node.update(V, *infos)
+            node.ind_update(V, *infos)
 
     def _check_hierarchy(self, ions, leaf):
         self._check_root(leaf)
@@ -417,17 +612,51 @@ class MixIons(IonChannel, Container):
         self.channels.update(self._format_elements(Channel, **elements))
         for elem in tuple(elements.values()):
             elem: Channel
-            for ion_root in elem.root_type.__args__:
+            owner_specs = _channel_current_owner_specs(elem)
+            if not owner_specs:
+                owner_specs = tuple((None, ion_root) for ion_root in elem.root_type.__args__)
+            for component_key, ion_root in owner_specs:
                 ion = self._get_ion(ion_root)
-                ion.register_external_current(id(elem), self._get_ion_fun(ion, elem))
+                key = id(elem) if component_key is None else (id(elem), component_key)
+                ion.register_external_current(key, self._get_ion_fun(ion, elem, component_key=component_key))
 
-    def _get_ion_fun(self, ion: 'Ion', node: 'Channel'):
+    def _get_ion_fun(self, ion: 'Ion', node: 'Channel', *, component_key=None):
+        """Build an ion-external-current callback for a mixed channel.
+
+        Parameters
+        ----------
+        ion : Ion
+            Ion instance that owns the callback.
+        node : Channel
+            Mixed-ion channel instance whose current is being exposed
+            through the owner ion.
+        component_key : str or None, optional
+            Component key to retrieve from
+            ``node.current_components(...)``. ``None`` keeps the
+            legacy behavior and exposes ``node.current(...)``.
+
+        Returns
+        -------
+        callable
+            Function with signature ``fun(V, ion_info)`` suitable for
+            :meth:`Ion.register_external_current`.
+
+        Notes
+        -----
+        This wrapper is the compatibility boundary for multi-owner
+        currents. The membrane solver still calls ``node.current(...)``
+        once for total current, while owner ions may receive individual
+        components when ``component_key`` is set.
+        """
+
         def fun(V, ion_info):
-            infos = tuple([
-                (ion_info if isinstance(ion, root) else self._get_ion(root).pack_info())
-                for root in node.root_type.__args__
-            ])
-            return node.current(V, *infos)
+            infos = tuple(
+                [
+                    (ion_info if isinstance(ion, root) else self._get_ion(root).pack_info())
+                    for root in node.root_type.__args__
+                ]
+            )
+            return _channel_component_current(node, component_key, V, *infos)
 
         return fun
 

@@ -1,3 +1,18 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Unit tests for :mod:`braincell._base_ion`.
 
 ARCH-03: verify Ion / MixIons / mix_ions live in their own module and
@@ -5,6 +20,10 @@ remain re-exported through :mod:`braincell._base` for back-compat.
 """
 
 import unittest
+
+import brainstate
+import brainunit as u
+import jax.numpy as jnp
 
 
 class BaseIonSplitTest(unittest.TestCase):
@@ -18,13 +37,220 @@ class BaseIonSplitTest(unittest.TestCase):
 
     def test_direct_import_still_works(self) -> None:
         from braincell._base import Ion, MixIons, mix_ions
+
         self.assertTrue(callable(mix_ions))
 
     def test_ion_inherits_from_ion_channel(self) -> None:
         from braincell._base_channel import IonChannel
         from braincell._base_ion import Ion, MixIons
+
         self.assertTrue(issubclass(Ion, IonChannel))
         self.assertTrue(issubclass(MixIons, IonChannel))
+
+
+class IonIndependentIntegrationDispatchTest(unittest.TestCase):
+    def test_ind_update_dispatches_to_make_integration_for_independent_ions(self) -> None:
+        from braincell.ion import Calcium
+        from braincell._base import Channel, IonInfo
+        from braincell.quad.protocol import IndependentIntegration
+
+        class _IndependentChildChannel(Channel, IndependentIntegration):
+            root_type = Calcium
+
+            def __init__(self, size=1):
+                Channel.__init__(self, size=size, name=None)
+                IndependentIntegration.__init__(self, solver="euler")
+                self.calls = []
+
+            def make_integration(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+
+            def init_state(self, V, ion, batch_size=None):  # pragma: no cover
+                pass
+
+            def reset_state(self, V, ion, batch_size=None):  # pragma: no cover
+                pass
+
+            def compute_derivative(self, V, ion):  # pragma: no cover
+                pass
+
+            def current(self, V, ion):  # pragma: no cover
+                return 0.0 * u.nA / u.cm**2
+
+        class _IndependentIon(Calcium, IndependentIntegration):
+            def __init__(self):
+                Calcium.__init__(self, size=1, name=None, child=_IndependentChildChannel())
+                IndependentIntegration.__init__(self, solver="euler")
+                self.Ci = 0.1 * u.mM
+                self.Co = 2.0 * u.mM
+                self.temp = u.celsius2kelvin(36.0)
+                self.valence = 2
+                self.calls = []
+
+            @property
+            def E(self):
+                return 120.0 * u.mV
+
+            def make_integration(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+
+        ion = _IndependentIon()
+        ion.ind_update(jnp.array([-65.0]) * u.mV)
+
+        self.assertEqual(len(ion.calls), 1)
+        self.assertEqual(len(ion.channels["child"].calls), 1)
+        child_args, child_kwargs = ion.channels["child"].calls[0]
+        self.assertEqual(len(child_args), 2)
+        self.assertEqual(child_kwargs, {})
+        self.assertIsInstance(child_args[1], IonInfo)
+
+    def test_ind_update_skips_dependent_child_channel_under_independent_ion(self) -> None:
+        from braincell.ion import Calcium
+        from braincell._base import Channel
+        from braincell.quad.protocol import DiffEqSingleState
+        from braincell.quad.protocol import IndependentIntegration
+
+        class _DependentChildChannel(Channel):
+            root_type = Calcium
+
+            def __init__(self, size=1):
+                super().__init__(size=size, name=None)
+                self.x = DiffEqSingleState(jnp.asarray([1.0]))
+
+            def init_state(self, V, ion, batch_size=None):  # pragma: no cover
+                pass
+
+            def reset_state(self, V, ion, batch_size=None):  # pragma: no cover
+                pass
+
+            def compute_derivative(self, V, ion):  # pragma: no cover
+                pass
+
+            def current(self, V, ion):  # pragma: no cover
+                return 0.0 * u.nA / u.cm**2
+
+        class _IndependentIon(Calcium, IndependentIntegration):
+            def __init__(self):
+                Calcium.__init__(self, size=1, name=None, child=_DependentChildChannel())
+                IndependentIntegration.__init__(self, solver="euler")
+                self.Ci = 0.1 * u.mM
+                self.Co = 2.0 * u.mM
+                self.temp = u.celsius2kelvin(36.0)
+                self.valence = 2
+                self.calls = []
+
+            @property
+            def E(self):
+                return 120.0 * u.mV
+
+            def make_integration(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+
+        ion = _IndependentIon()
+        ion.ind_update(jnp.array([-65.0]) * u.mV)
+
+        self.assertEqual(len(ion.calls), 1)
+        self.assertEqual(float(ion.channels["child"].x.value[0]), 1.0)
+
+    def test_recursive_child_false_skips_child_lifecycle_methods(self) -> None:
+        from braincell.ion import Calcium
+        from braincell._base import Channel
+
+        class _ChildChannel(Channel):
+            root_type = Calcium
+
+            def __init__(self):
+                super().__init__(size=1, name=None)
+                self.calls = []
+
+            def pre_integral(self, V, ion):
+                self.calls.append(("pre", ion))
+
+            def compute_derivative(self, V, ion):
+                self.calls.append(("compute", ion))
+
+            def post_integral(self, V, ion):
+                self.calls.append(("post", ion))
+
+            def current(self, V, ion):  # pragma: no cover
+                return 0.0 * u.nA / u.cm**2
+
+        class _Ion(Calcium):
+            def __init__(self):
+                Calcium.__init__(self, size=1, name=None, child=_ChildChannel())
+                self.Ci = 0.1 * u.mM
+                self.Co = 2.0 * u.mM
+                self.temp = u.celsius2kelvin(36.0)
+                self.valence = 2
+                self.calls = []
+
+            @property
+            def E(self):
+                return 120.0 * u.mV
+
+            def _ion_pre_integral_hook(self, V):
+                self.calls.append("pre")
+
+            def _ion_compute_derivative_hook(self, V):
+                self.calls.append("compute")
+
+            def _ion_post_integral_hook(self, V):
+                self.calls.append("post")
+
+        ion = _Ion()
+        V = jnp.array([-65.0]) * u.mV
+
+        ion.pre_integral(V, recursive_child=False)
+        ion.compute_derivative(V, recursive_child=False)
+        ion.post_integral(V, recursive_child=False)
+
+        self.assertEqual(ion.calls, ["pre", "compute", "post"])
+        self.assertEqual(ion.channels["child"].calls, [])
+
+    def test_ind_update_recursive_child_false_skips_independent_child_channel(self) -> None:
+        from braincell.ion import Calcium
+        from braincell._base import Channel
+        from braincell.quad.protocol import IndependentIntegration
+
+        class _IndependentChildChannel(Channel, IndependentIntegration):
+            root_type = Calcium
+
+            def __init__(self):
+                Channel.__init__(self, size=1, name=None)
+                IndependentIntegration.__init__(self, solver="euler")
+                self.calls = []
+
+            def make_integration(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+
+            def current(self, V, ion):  # pragma: no cover
+                return 0.0 * u.nA / u.cm**2
+
+        class _IndependentIon(Calcium, IndependentIntegration):
+            def __init__(self):
+                Calcium.__init__(self, size=1, name=None, child=_IndependentChildChannel())
+                IndependentIntegration.__init__(self, solver="euler")
+                self.Ci = 0.1 * u.mM
+                self.Co = 2.0 * u.mM
+                self.temp = u.celsius2kelvin(36.0)
+                self.valence = 2
+                self.calls = []
+
+            @property
+            def E(self):
+                return 120.0 * u.mV
+
+            def make_integration(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+
+        ion = _IndependentIon()
+        ion.ind_update(jnp.array([-65.0]) * u.mV, recursive_child=False)
+
+        self.assertEqual(len(ion.calls), 1)
+        args, kwargs = ion.calls[0]
+        self.assertEqual(len(args), 1)
+        self.assertEqual(kwargs, {"recursive_child": False})
+        self.assertEqual(ion.channels["child"].calls, [])
 
 
 if __name__ == "__main__":

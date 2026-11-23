@@ -41,6 +41,7 @@ import numpy as np
 
 from braincell.morph import MorphoBranch
 from braincell.morph.morphology import Morphology
+from braincell.vis._traversal import iter_bottom_up
 
 # ---------------------------------------------------------------------------
 # Shared angle / bend constants
@@ -57,6 +58,7 @@ _DEFAULT_BEND_FRACTION = 0.4
 # ---------------------------------------------------------------------------
 # Dataclasses shared across layout families
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class _LayoutSpec2D:
@@ -103,6 +105,7 @@ class LayoutBranch2D:
 # Morphology → layout spec helpers
 # ---------------------------------------------------------------------------
 
+
 def _build_layout_specs(morpho: Morphology) -> dict[int, _LayoutSpec2D]:
     return {
         branch.index: _LayoutSpec2D(
@@ -127,38 +130,30 @@ def _normalize_min_branch_angle_rad(value: float | None) -> float:
 
 def _leaf_counts_by_branch(root: MorphoBranch) -> dict[int, int]:
     counts: dict[int, int] = {}
-
-    def visit(node: MorphoBranch) -> int:
+    for node in iter_bottom_up(root):
         if node.n_children == 0:
             counts[node.index] = 1
-            return 1
-        total = sum(visit(child) for child in node.children)
-        counts[node.index] = total
-        return total
-
-    visit(root)
+        else:
+            counts[node.index] = sum(counts[child.index] for child in node.children)
     return counts
 
 
 def _path_lengths_um_by_branch(root: MorphoBranch) -> dict[int, float]:
     path_lengths_um: dict[int, float] = {}
-
-    def visit(node: MorphoBranch) -> float:
+    for node in iter_bottom_up(root):
         branch_length_um = float(node.length.to_decimal(u.um))
         if node.n_children == 0:
             path_lengths_um[node.index] = branch_length_um
-            return branch_length_um
-        max_child_length_um = max(visit(child) for child in node.children)
-        path_lengths_um[node.index] = branch_length_um + max_child_length_um
-        return path_lengths_um[node.index]
-
-    visit(root)
+        else:
+            max_child_length_um = max(path_lengths_um[child.index] for child in node.children)
+            path_lengths_um[node.index] = branch_length_um + max_child_length_um
     return path_lengths_um
 
 
 # ---------------------------------------------------------------------------
 # Trunk / side child selection
 # ---------------------------------------------------------------------------
+
 
 def _pick_trunk_child(
     children: tuple[MorphoBranch, ...],
@@ -209,6 +204,7 @@ def _clamp_angle_to_root_group(angle_rad: float, *, group_name: str) -> float:
 # Weighted angular allocation
 # ---------------------------------------------------------------------------
 
+
 def _allocate_weighted_angles(
     children: tuple[MorphoBranch, ...],
     *,
@@ -240,8 +236,9 @@ def _weighted_child_intervals(
     child_intervals: list[tuple[MorphoBranch, tuple[float, float]]] = []
     for child_index, child in enumerate(children):
         weight = max(float(weights.get(child.index, 1.0)), 1e-6)
-        width_rad = available_span_rad * weight / total_weight if total_weight > 0.0 else available_span_rad / len(
-            children)
+        width_rad = (
+            available_span_rad * weight / total_weight if total_weight > 0.0 else available_span_rad / len(children)
+        )
         child_interval = (cursor_rad, cursor_rad + width_rad)
         child_intervals.append((child, child_interval))
         cursor_rad = child_interval[1]
@@ -259,6 +256,7 @@ def _weighted_child_intervals(
 # legacy layout, but the balloon family also relies on it. The helper
 # therefore lives in the shared module under its original name; the
 # behaviour is unchanged.
+
 
 def _allocate_child_regions_legacy(
     *,

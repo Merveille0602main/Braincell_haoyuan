@@ -19,17 +19,30 @@ The leading underscore in the filename keeps pytest from discovering this
 module as a test file. Helpers here are consumed by the co-located
 ``*_test.py`` modules; nothing in this file is part of the public API.
 
-All helpers return ``braincell.morph.Morphology`` objects built from
+Most helpers return ``braincell.morph.Morphology`` objects built from
 canned parameters so assertions can reason about exact segment lengths,
-radii, and positions without re-computing them per test.
+radii, and positions without re-computing them per test. The tail of the
+module holds render-backend doubles used by the plot and backend tests.
 """
 
+import importlib.util
+
 import brainunit as u
+import pytest
 
 from braincell import Branch, Morphology
 
+# Re-exported so the vis tests that render real reconstructions keep importing
+# everything they need from this module. braincell/io/_testing.py owns them,
+# since the fixtures are SWC/ASC files the io readers parse.
+from braincell.io._testing import (  # noqa: F401
+    ALLOWED_TYPES,
+    FIXTURE_DIR,
+    VALID_SWC_FIXTURES,
+)
 
-def make_point_tree() -> Morphology:
+
+def make_node_tree() -> Morphology:
     """A single-branch soma with explicit 3D points.
 
     Useful whenever a test needs a morphology that satisfies
@@ -67,6 +80,25 @@ def make_length_only_tree(*, child_name: str = "dend") -> Morphology:
     )
     tree = Morphology.from_root(soma, name="soma")
     tree.attach(parent="soma", child_branch=dend, child_name=child_name, parent_x=1.0)
+    return tree
+
+
+def make_four_type_tree() -> Morphology:
+    """Soma with an apical dendrite, a basal dendrite, and an axon.
+
+    Length-only geometry. The four distinct branch types exercise every
+    entry of the default palette at once, so a colour-mapping regression
+    shows up on a single render. Used by the matplotlib layout/colorbar
+    tests and by ``compare2d_test.py``.
+    """
+    soma = Branch.from_lengths(lengths=[20.0] * u.um, radii=[10.0, 10.0] * u.um, type="soma")
+    apical = Branch.from_lengths(lengths=[50.0, 40.0] * u.um, radii=[3.0, 2.0, 1.5] * u.um, type="apical_dendrite")
+    basal = Branch.from_lengths(lengths=[30.0] * u.um, radii=[2.0, 1.5] * u.um, type="basal_dendrite")
+    axon = Branch.from_lengths(lengths=[40.0] * u.um, radii=[1.0, 0.6] * u.um, type="axon")
+    tree = Morphology.from_root(soma, name="soma")
+    tree.attach(parent="soma", child_branch=apical, child_name="apical", parent_x=1.0)
+    tree.attach(parent="soma", child_branch=basal, child_name="basal", parent_x=1.0)
+    tree.attach(parent="soma", child_branch=axon, child_name="axon", parent_x=1.0)
     return tree
 
 
@@ -124,7 +156,7 @@ def make_two_dendrite_tree() -> Morphology:
     return tree
 
 
-def make_projected_point_tree() -> Morphology:
+def make_projected_node_tree() -> Morphology:
     """Soma + apical dendrite with explicit 3D points.
 
     The dendrite has three points (so the projected 2D centerline has
@@ -192,3 +224,118 @@ def make_fan_root_partition_tree() -> Morphology:
         parent_x=1.0,
     )
     return tree
+
+
+def make_deep_chain_tree(n_branches: int = 1200) -> Morphology:
+    """An unbranched chain of ``n_branches`` branches hanging off a soma.
+
+    Reconstructions of long, thin neurites routinely produce chains far
+    deeper than CPython's default recursion limit, so this fixture exists
+    to pin the tree walks in :mod:`braincell.vis` as iterative. The
+    default depth is comfortably past the ~400-branch point where the
+    old recursive walks raised ``RecursionError``, while staying small
+    enough to lay out in well under a second.
+
+    Parameters
+    ----------
+    n_branches : int
+        Total branch count, soma included. Must be at least 1.
+
+    Returns
+    -------
+    Morphology
+        A chain ``soma -> seg_0 -> seg_1 -> ...``, every dendrite branch
+        carrying two 15 µm / 10 µm segments.
+    """
+    if n_branches < 1:
+        raise ValueError(f"n_branches must be >= 1, got {n_branches!r}.")
+    soma = Branch.from_lengths(
+        lengths=[20.0] * u.um,
+        radii=[10.0, 10.0] * u.um,
+        type="soma",
+    )
+    tree = Morphology.from_root(soma, name="soma")
+    parent = "soma"
+    for index in range(n_branches - 1):
+        child = Branch.from_lengths(
+            lengths=[15.0, 10.0] * u.um,
+            radii=[2.0, 1.5, 1.0] * u.um,
+            type="apical_dendrite",
+        )
+        name = f"seg_{index}"
+        tree.attach(parent=parent, child_branch=child, child_name=name, parent_x=1.0)
+        parent = name
+    return tree
+
+
+# =============================================================================
+# Backend doubles
+# =============================================================================
+
+
+class FakeBackend:
+    """Scene-agnostic test double that records the last :class:`RenderRequest`.
+
+    Advertises ``supported_scene_kinds = frozenset({"2d", "3d"})`` so
+    :func:`validate_backend_for_scene` accepts it for either dispatch
+    direction, and returns the request unchanged so tests can inspect
+    the scene that would be rendered.
+    """
+
+    name = "fake"
+    supported_scene_kinds = frozenset({"2d", "3d"})
+
+    def __init__(self) -> None:
+        self.last_request = None
+
+    def available(self) -> bool:
+        return True
+
+    def render(self, request):
+        self.last_request = request
+        return request
+
+
+# =============================================================================
+# TestCase mixins
+# =============================================================================
+
+
+class VisDefaultsResetMixin:
+    """Restore ``braincell.vis`` global defaults around every test.
+
+    ``plot2d``/``plot3d`` read module-level defaults that several tests
+    mutate. Mixing this in ahead of :class:`unittest.TestCase` gives a clean
+    slate on entry and on exit, including when the test raises.
+    """
+
+    def setUp(self) -> None:  # noqa: N802 - unittest naming
+        super().setUp()
+        from braincell import vis as _vis
+
+        _vis.reset_defaults()
+        self.addCleanup(_vis.reset_defaults)
+
+
+# =============================================================================
+# Optional plugin probes
+# =============================================================================
+
+PYTEST_BENCHMARK_AVAILABLE = importlib.util.find_spec("pytest_benchmark") is not None
+"""True when the optional ``pytest-benchmark`` plugin is importable."""
+
+needs_benchmark = pytest.mark.skipif(
+    not PYTEST_BENCHMARK_AVAILABLE,
+    reason="pytest-benchmark is not installed",
+)
+"""Skip mark for the performance baselines in ``braincell.vis``.
+
+Apply it per function rather than as a module-level ``pytestmark``: every file
+carrying benchmarks also carries ordinary tests that must keep running when the
+plugin is absent.
+
+Benchmarks must be plain pytest functions, never :class:`unittest.TestCase`
+methods — pytest cannot inject the function-scoped ``benchmark`` fixture into a
+``TestCase``. They pair with the ``clean_layout_cache`` fixture from
+``braincell/vis/conftest.py``, which pytest supplies by name.
+"""

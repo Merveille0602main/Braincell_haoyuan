@@ -23,9 +23,11 @@ guard against misuse and verify the registry metadata.
 """
 
 import unittest
+from unittest.mock import patch
 
 import brainstate
 import brainunit as u
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -33,13 +35,19 @@ from braincell import (
     Branch,
     CVPerBranch,
     Cell,
+    CurrentClamp,
     DiffEqModule,
     Morphology,
+    mech,
 )
-from braincell.quad import  get_registry, staggered_step
+from braincell.filter import AllRegion, RootLocation
+from braincell.quad import get_registry, staggered_step
 from braincell.quad._staggered import (
     _build_backsub_indices,
+    _build_dhs_ordinary_backsub_order,
+    _linear_and_const_term,
     _to_jax_quantity,
+    comp_backsub_hines_raw,
     comp_backsub_raw,
     comp_triang_raw,
     dhs_voltage_step,
@@ -57,9 +65,7 @@ class StaggeredReadsRuntimeAttrDirectlyTest(unittest.TestCase):
             dhs_static_source_np = None
 
             def __getattribute__(self, name):
-                raise AssertionError(
-                    f"_compiled_runtime must not be read (got getattr {name!r})"
-                )
+                raise AssertionError(f"_compiled_runtime must not be read (got getattr {name!r})")
 
         class _Target:
             _compiled_runtime = _TrapRuntime()
@@ -67,31 +73,130 @@ class StaggeredReadsRuntimeAttrDirectlyTest(unittest.TestCase):
         # Missing ``_runtime`` must raise AttributeError outright — not quietly
         # fall back to ``_compiled_runtime``.
         with self.assertRaises(AttributeError):
-            _get_dhs_static_source(_Target(), point_tree=None, scheduling=None)
+            _get_dhs_static_source(_Target(), node_tree=None, scheduling=None)
 
 
 class DhsVoltageGuardTest(unittest.TestCase):
-
-    def test_requires_point_tree_attribute(self):
+    def test_requires_node_tree_attribute(self):
         class Plain(brainstate.nn.Module):
             pass
 
-        with self.assertRaisesRegex(TypeError, "point-tree aware"):
-            dhs_voltage_step(Plain(), 0. * u.ms, 0.1 * u.ms)
+        with self.assertRaisesRegex(TypeError, "node-tree aware"):
+            dhs_voltage_step(Plain(), 0.0 * u.ms, 0.1 * u.ms)
 
-    def test_requires_both_point_tree_and_scheduling(self):
-        # An object with only ``point_tree`` is still rejected because the
+    def test_requires_both_node_tree_and_scheduling(self):
+        # An object with only ``node_tree`` is still rejected because the
         # scheduling helper is missing.
         class HalfTarget(brainstate.nn.Module):
-            def point_tree(self):  # pragma: no cover - never called
+            def node_tree(self):  # pragma: no cover - never called
                 return None
 
-        with self.assertRaisesRegex(TypeError, "point-tree aware"):
-            dhs_voltage_step(HalfTarget(), 0. * u.ms, 0.1 * u.ms)
+        with self.assertRaisesRegex(TypeError, "node-tree aware"):
+            dhs_voltage_step(HalfTarget(), 0.0 * u.ms, 0.1 * u.ms)
+
+
+class DhsLinearizationUnitTest(unittest.TestCase):
+    def test_linear_unit_uses_derivative_over_voltage_when_grad_is_unitless(self):
+        class Target:
+            def _voltage_linearizer(self):
+                def linearizer(V):
+                    linear = jnp.full(V.shape, -0.1)
+                    derivative = jnp.full(V.shape, 2.0) * (u.nA / u.uF)
+                    return linear, derivative
+
+                return linearizer
+
+        V_n = jnp.array([-65.0, -64.0]) * u.mV
+        linear, const = _linear_and_const_term(Target(), V_n)
+
+        expected_linear_unit = (u.nA / u.uF) / u.mV
+        np.testing.assert_allclose(np.asarray(linear.to_decimal(expected_linear_unit)), [-0.1, -0.1])
+        self.assertEqual(u.get_unit(const), u.get_unit(2.0 * u.nA / u.uF))
+        np.testing.assert_allclose(np.asarray((V_n * linear + const).to_decimal(u.nA / u.uF)), [2.0, 2.0])
+
+
+class StaggeredAutodiffTest(unittest.TestCase):
+    @staticmethod
+    def _hh_cell():
+        soma = Branch.from_lengths(
+            lengths=[20.0] * u.um,
+            radii=[10.0, 10.0] * u.um,
+            type="soma",
+        )
+        cell = Cell(
+            Morphology.from_root(soma, name="soma"),
+            cv_policy=CVPerBranch(),
+            V_init=-65.0 * u.mV,
+            solver="staggered",
+        )
+        cell.paint(
+            AllRegion(),
+            mech.Channel(
+                "Na_HH1952",
+                name="na_hh",
+                g_max=12.0 * (u.mS / u.cm**2),
+            ),
+        )
+        cell.paint(
+            AllRegion(),
+            mech.Channel(
+                "K_HH1952",
+                name="k_hh",
+                g_max=3.6 * (u.mS / u.cm**2),
+            ),
+        )
+        cell.paint(
+            AllRegion(),
+            mech.Channel(
+                "IL",
+                name="leak",
+                g_max=0.3 * (u.mS / u.cm**2),
+                E=-54.3 * u.mV,
+            ),
+        )
+        cell.init_state()
+        return cell
+
+    def test_multistep_voltage_and_conductance_gradients_match_finite_difference(self):
+        cell = self._hh_cell()
+        sodium = cell.ion_channels["na"].channels["na_hh"]
+        original_g_max = sodium.g_max
+        conductance_unit = u.mS / u.cm**2
+        active_mask = u.get_mantissa(original_g_max) != 0
+
+        def objective(v0_mantissa, g_max_mantissa):
+            sodium.g_max = active_mask * g_max_mantissa * conductance_unit
+            cell.reset_state()
+            cell.V.value = jnp.broadcast_to(v0_mantissa, cell.V.value.shape) * u.mV
+
+            def step(_):
+                cell.update()
+                return cell.V.value
+
+            trace = brainstate.transform.for_loop(step, jnp.arange(6))
+            return jnp.sum(trace[-1].to_decimal(u.mV))
+
+        try:
+            with brainstate.environ.context(dt=0.025 * u.ms, precision=64):
+                v0 = jnp.asarray(-65.0, dtype=jnp.float64)
+                g_max = jnp.asarray(12.0, dtype=jnp.float64)
+                grad_v0, grad_g_max = jax.grad(objective, argnums=(0, 1))(v0, g_max)
+
+                epsilon = 1e-3
+                finite_diff_v0 = (objective(v0 + epsilon, g_max) - objective(v0 - epsilon, g_max)) / (2.0 * epsilon)
+                finite_diff_g_max = (objective(v0, g_max + epsilon) - objective(v0, g_max - epsilon)) / (2.0 * epsilon)
+
+            for gradient in (grad_v0, grad_g_max):
+                self.assertTrue(bool(jnp.isfinite(gradient)))
+                self.assertNotEqual(float(gradient), 0.0)
+            np.testing.assert_allclose(grad_v0, finite_diff_v0, rtol=1e-4, atol=1e-8)
+            np.testing.assert_allclose(grad_g_max, finite_diff_g_max, rtol=1e-4, atol=1e-8)
+        finally:
+            sodium.g_max = original_g_max
+            cell.reset_state()
 
 
 class CompTriangRawTest(unittest.TestCase):
-
     def test_no_levels_is_identity(self):
         diags = jnp.array([[2.0, 3.0]])
         solves = jnp.array([[5.0, 7.0]])
@@ -99,9 +204,7 @@ class CompTriangRawTest(unittest.TestCase):
         uppers = jnp.array([0.0, 0.0])
         edges = jnp.empty((0, 2), dtype=jnp.int32)
         level_offsets = np.array([0], dtype=np.int32)
-        new_diags, new_solves = comp_triang_raw(
-            diags, solves, lowers, uppers, edges, level_offsets
-        )
+        new_diags, new_solves = comp_triang_raw(diags, solves, lowers, uppers, edges, level_offsets)
         np.testing.assert_array_equal(new_diags, diags)
         np.testing.assert_array_equal(new_solves, solves)
 
@@ -143,7 +246,6 @@ class CompTriangRawTest(unittest.TestCase):
 
 
 class CompBacksubRawTest(unittest.TestCase):
-
     def test_kernel_contract_violation_on_shape_mismatch(self):
         diags = jnp.array([[2.0, 3.0]])
         solves = jnp.array([[1.0, 1.0, 1.0]])  # mismatched second dim
@@ -162,8 +264,47 @@ class CompBacksubRawTest(unittest.TestCase):
         self.assertTrue(u.get_unit(out).has_same_dim(u.mV))
 
 
-class BuildBacksubIndicesTest(unittest.TestCase):
+class CompBacksubHinesRawTest(unittest.TestCase):
+    def test_chain_matches_recursive_doubling(self):
+        diags = jnp.asarray([[2.0, 3.0, 4.0, 1.0]])
+        solves = jnp.asarray([[4.0, 3.0, 8.0, 0.0]]) * u.mV
+        lowers = jnp.asarray([0.0, -1.0, -2.0, 0.0])
+        ordinary_edges = np.asarray([[1, 0], [2, 1]], dtype=np.int32)
+        ordinary_offsets = np.asarray([0, 1, 2], dtype=np.int32)
+        parent_lookup = np.asarray([3, 0, 1, 3], dtype=np.int32)
+        recursive_indices = _build_backsub_indices(parent_lookup, n_nodes=3)
 
+        ordinary = comp_backsub_hines_raw(diags, solves, lowers, ordinary_edges, ordinary_offsets)
+        recursive = comp_backsub_raw(diags, solves, lowers, recursive_indices)
+
+        self.assertIsInstance(ordinary, u.Quantity)
+        np.testing.assert_allclose(ordinary.to_decimal(u.mV), recursive.to_decimal(u.mV), rtol=1e-6, atol=1e-7)
+
+    def test_schedule_is_root_to_leaf_and_covers_each_edge(self):
+        soma = Branch.from_lengths(lengths=[20.0] * u.um, radii=[10.0, 10.0] * u.um, type="soma")
+        morphology = Morphology.from_root(soma, name="soma")
+        parent = "soma"
+        for index in range(3):
+            branch = Branch.from_lengths(lengths=[20.0] * u.um, radii=[2.0, 2.0] * u.um, type="dendrite")
+            name = f"dend_{index}"
+            morphology.attach(parent=parent, child_branch=branch, child_name=name, parent_x=1.0)
+            parent = name
+        cell = Cell(morphology, cv_policy=CVPerBranch())
+        cell.init_state()
+        scheduling = cell.node_scheduling(algorithm="dhs")
+        edges, level_size = _build_dhs_ordinary_backsub_order(scheduling)
+
+        self.assertEqual(edges.shape[0], len(cell.node_tree.nodes) - 1)
+        self.assertEqual(int(level_size.sum()), edges.shape[0])
+        roots = np.flatnonzero(scheduling.parent_rows < 0)
+        self.assertEqual(len(roots), 1)
+        seen = {int(roots[0])}
+        for child, parent_row in edges.tolist():
+            self.assertIn(parent_row, seen)
+            seen.add(child)
+
+
+class BuildBacksubIndicesTest(unittest.TestCase):
     def test_root_only_tree(self):
         # A single node with sentinel parent: ancestor at any step is
         # the sentinel itself (index 1).
@@ -184,7 +325,6 @@ class BuildBacksubIndicesTest(unittest.TestCase):
 
 
 class StaggeredStepGuardTest(unittest.TestCase):
-
     def test_rejects_plain_module(self):
         class Plain(brainstate.nn.Module):
             pass
@@ -202,9 +342,52 @@ class StaggeredStepGuardTest(unittest.TestCase):
             staggered_step(Plain())
         self.assertIn(DiffEqModule.__name__, str(ctx.exception))
 
+    def test_family_schedule_integrates_synapses_then_family_after_voltage(self):
+        calls = []
+        soma = Branch.from_lengths(
+            lengths=[20.0] * u.um,
+            radii=[10.0, 10.0] * u.um,
+            type="soma",
+        )
+        cell = Cell(Morphology.from_root(soma, name="soma"), cv_policy=CVPerBranch())
+        cell.init_state()
+        cell._update_runtime_synapses = lambda point_V: calls.append("synapse")
+        cell._integrate_runtime_synapse_dynamics = lambda point_V: calls.append("synapse_dynamics")
+        cell._update_ion_channel_families = lambda point_V: calls.append("family")
+        cell._update_ion_channels_by_integration = lambda point_V: calls.append("integration")
+
+        with patch("braincell.quad._staggered.dhs_voltage_step", lambda *args: calls.append("voltage")):
+            with brainstate.environ.context(t=0.0 * u.ms, dt=0.1 * u.ms):
+                staggered_step(cell)
+
+        self.assertEqual(calls, ["voltage", "synapse_dynamics", "family"])
+
+    def test_integration_schedule_integrates_after_voltage_without_preparing_synapses(self):
+        calls = []
+        soma = Branch.from_lengths(
+            lengths=[20.0] * u.um,
+            radii=[10.0, 10.0] * u.um,
+            type="soma",
+        )
+        cell = Cell(
+            Morphology.from_root(soma, name="soma"),
+            cv_policy=CVPerBranch(),
+            ion_channel_update_order="integration",
+        )
+        cell.init_state()
+        cell._update_runtime_synapses = lambda point_V: calls.append("synapse")
+        cell._prepare_runtime_synapse_inputs = lambda point_V: calls.append("prepare")
+        cell._update_ion_channel_families = lambda point_V: calls.append("family")
+        cell._update_ion_channels_by_integration = lambda point_V: calls.append("integration")
+
+        with patch("braincell.quad._staggered.dhs_voltage_step", lambda *args: calls.append("voltage")):
+            with brainstate.environ.context(t=0.0 * u.ms, dt=0.1 * u.ms):
+                staggered_step(cell)
+
+        self.assertEqual(calls, ["voltage", "integration"])
+
 
 class StaggeredRegistryMetadataTest(unittest.TestCase):
-
     def test_canonical_name_and_alias(self):
         registry = get_registry()
         self.assertIn("staggered", registry)
@@ -221,7 +404,6 @@ class StaggeredRegistryMetadataTest(unittest.TestCase):
 
 
 class DhsRuntimeCacheTest(unittest.TestCase):
-
     def _simple_cell(self):
         soma = Branch.from_lengths(
             lengths=[20.0] * u.um,
@@ -262,6 +444,98 @@ class DhsRuntimeCacheTest(unittest.TestCase):
         with brainstate.environ.context(precision=64):
             preserved = _to_jax_quantity(voltage32, u.mV)
             self.assertEqual(preserved.dtype, jnp.dtype(jnp.float32))
+
+
+class DhsEndpointClampTest(unittest.TestCase):
+    def test_root_endpoint_current_changes_midpoint_voltage(self):
+        soma = Branch.from_lengths(
+            lengths=[20.0] * u.um,
+            radii=[10.0, 10.0] * u.um,
+            type="soma",
+        )
+        cell = Cell(Morphology.from_root(soma, name="soma"), cv_policy=CVPerBranch())
+        cell.place(RootLocation(x=0.0), CurrentClamp(durations=1.0 * u.ms, amplitudes=1.0 * u.nA))
+        cell.init_state()
+
+        before = float(cell.V.value[0, 0].to_decimal(u.mV))
+        with brainstate.environ.context(t=0.0 * u.ms, dt=0.05 * u.ms):
+            dhs_voltage_step(cell, 0.0 * u.ms, 0.05 * u.ms)
+        after = float(cell.V.value[0, 0].to_decimal(u.mV))
+
+        self.assertGreater(after, before)
+
+
+class DhsMidpointClampPopulationTest(unittest.TestCase):
+    def _build_clamped_cell(self, *, pop_size=None):
+        soma = Branch.from_lengths(
+            lengths=[20.0] * u.um,
+            radii=[10.0, 10.0] * u.um,
+            type="soma",
+        )
+        kwargs = {} if pop_size is None else {"pop_size": pop_size}
+        cell = Cell(
+            Morphology.from_root(soma, name="soma"),
+            cv_policy=CVPerBranch(),
+            V_init=-65.0 * u.mV,
+            **kwargs,
+        )
+        cell.place(
+            RootLocation(x=0.5),
+            CurrentClamp(
+                delay=0.0 * u.ms,
+                durations=0.1 * u.ms,
+                amplitudes=1.0 * u.nA,
+            ),
+        )
+        cell.init_state()
+        cell.reset_state()
+        return cell
+
+    def test_midpoint_clamp_is_not_double_counted_with_population_axis(self):
+        # A Cell always carries a population axis, so the invariant is that
+        # widening it changes nothing: a homogeneous population of N members
+        # must reproduce the single-member trace N times. A midpoint clamp
+        # applied once per population member instead of once per CV would
+        # break this.
+        single = self._build_clamped_cell()
+        population = self._build_clamped_cell(pop_size=(3,))
+        self.assertEqual(single.pop_size, (1,))
+
+        with brainstate.environ.context(t=0.0 * u.ms, dt=0.025 * u.ms):
+            dhs_voltage_step(single, 0.0 * u.ms, 0.025 * u.ms)
+            dhs_voltage_step(population, 0.0 * u.ms, 0.025 * u.ms)
+
+        single_v = np.asarray(single.V.value.to_decimal(u.mV), dtype=float)
+        population_v = np.asarray(population.V.value.to_decimal(u.mV), dtype=float)
+        self.assertEqual(population_v.shape, (3,) + single_v.shape[1:])
+        for member in range(3):
+            np.testing.assert_allclose(population_v[member], single_v[0], rtol=1e-12, atol=1e-12)
+
+
+class DhsMultistepClampTest(unittest.TestCase):
+    def test_multistep_current_clamp_voltage_step_handles_zero_linearization(self):
+        soma = Branch.from_lengths(
+            lengths=[20.0] * u.um,
+            radii=[10.0, 10.0] * u.um,
+            type="soma",
+        )
+        cell = Cell(Morphology.from_root(soma, name="soma"), cv_policy=CVPerBranch())
+        cell.place(
+            RootLocation(x=0.0),
+            CurrentClamp(
+                delay=0.0 * u.ms,
+                durations=(0.5 * u.ms, 0.5 * u.ms),
+                amplitudes=(1.0 * u.nA, 0.0 * u.nA),
+            ),
+        )
+        cell.init_state()
+
+        before = float(cell.V.value[0, 0].to_decimal(u.mV))
+        with brainstate.environ.context(t=0.0 * u.ms, dt=0.05 * u.ms):
+            dhs_voltage_step(cell, 0.0 * u.ms, 0.05 * u.ms)
+        after = float(cell.V.value[0, 0].to_decimal(u.mV))
+
+        self.assertGreater(after, before)
 
 
 if __name__ == "__main__":

@@ -57,7 +57,27 @@ def _V(values, unit=u.mV):
     return jnp.asarray(values) * unit
 
 
-_DENSITY_UNIT = u.mS / u.cm ** 2 * u.mV
+_DENSITY_UNIT = u.mS / u.cm**2 * u.mV
+
+
+def _assert_markov_probability_total(testcase, channel, size: int) -> None:
+    states = channel.state_values()
+    total = None
+    for name in channel.state_names + (channel.redundant_state,):
+        total = states[name] if total is None else (total + states[name])
+    testcase.assertTrue(u.math.allclose(total, jnp.ones(size), atol=1e-6))
+
+
+def _assert_markov_stationary(testcase, channel, V, ion, size: int) -> None:
+    channel.compute_derivative(V, ion)
+    for name in channel.state_names:
+        testcase.assertTrue(
+            u.math.allclose(
+                getattr(channel, name).derivative,
+                jnp.zeros(size) / u.ms,
+                atol=1e-5 * u.Hz,
+            )
+        )
 
 
 class _HHNaMixin:
@@ -94,13 +114,11 @@ class _HHNaMixin:
             temp_ref=u.celsius2kelvin(36.0),
         )
         for gate in ch._iter_gates():
-            self.assertTrue(
-                u.math.allclose(ch.gate_phi(gate), 3.0 * jnp.ones(1), atol=1e-6)
-            )
+            self.assertTrue(u.math.allclose(ch.gate_phi(gate), 3.0 * jnp.ones(1), atol=1e-6))
 
     def test_default_gmax_has_current_density_units(self) -> None:
         ch = self._make(size=1)
-        _ = ch.g_max.to_decimal(u.mS / u.cm ** 2)
+        _ = ch.g_max.to_decimal(u.mS / u.cm**2)
 
     def test_init_state_creates_gates_shaped_to_size(self) -> None:
         ch = self._make(size=4)
@@ -120,16 +138,12 @@ class _HHNaMixin:
         ch.init_state(V, na)
         ch.reset_state(V, na)
 
-        alpha_p = ch.f_p_alpha(V)
-        beta_p = ch.f_p_beta(V)
-        alpha_q = ch.f_q_alpha(V)
-        beta_q = ch.f_q_beta(V)
-        self.assertTrue(
-            u.math.allclose(ch.p.value, alpha_p / (alpha_p + beta_p), atol=1e-6)
-        )
-        self.assertTrue(
-            u.math.allclose(ch.q.value, alpha_q / (alpha_q + beta_q), atol=1e-6)
-        )
+        alpha_p = ch.f_p_alpha(V, na)
+        beta_p = ch.f_p_beta(V, na)
+        alpha_q = ch.f_q_alpha(V, na)
+        beta_q = ch.f_q_beta(V, na)
+        self.assertTrue(u.math.allclose(ch.p.value, alpha_p / (alpha_p + beta_p), atol=1e-6))
+        self.assertTrue(u.math.allclose(ch.q.value, alpha_q / (alpha_q + beta_q), atol=1e-6))
         self.assertTrue(bool((ch.p.value >= 0).all() and (ch.p.value <= 1).all()))
         self.assertTrue(bool((ch.q.value >= 0).all() and (ch.q.value <= 1).all()))
 
@@ -143,25 +157,17 @@ class _HHNaMixin:
         ch.q.value = jnp.array([0.9])
         ch.compute_derivative(V, na)
 
-        alpha_p = ch.f_p_alpha(V)
-        beta_p = ch.f_p_beta(V)
-        alpha_q = ch.f_q_alpha(V)
-        beta_q = ch.f_q_beta(V)
+        alpha_p = ch.f_p_alpha(V, na)
+        beta_p = ch.f_p_beta(V, na)
+        alpha_q = ch.f_q_alpha(V, na)
+        beta_q = ch.f_q_beta(V, na)
         gates = {gate.name: gate for gate in ch._iter_gates()}
 
-        expected_dp = (
-            ch.gate_phi(gates["p"]) * (alpha_p * (1.0 - ch.p.value) - beta_p * ch.p.value) / u.ms
-        )
-        expected_dq = (
-            ch.gate_phi(gates["q"]) * (alpha_q * (1.0 - ch.q.value) - beta_q * ch.q.value) / u.ms
-        )
+        expected_dp = ch.gate_phi(gates["p"]) * (alpha_p * (1.0 - ch.p.value) - beta_p * ch.p.value) / u.ms
+        expected_dq = ch.gate_phi(gates["q"]) * (alpha_q * (1.0 - ch.q.value) - beta_q * ch.q.value) / u.ms
 
-        self.assertTrue(
-            u.math.allclose(ch.p.derivative, expected_dp, atol=1e-6 * u.Hz)
-        )
-        self.assertTrue(
-            u.math.allclose(ch.q.derivative, expected_dq, atol=1e-6 * u.Hz)
-        )
+        self.assertTrue(u.math.allclose(ch.p.derivative, expected_dp, atol=1e-6 * u.Hz))
+        self.assertTrue(u.math.allclose(ch.q.derivative, expected_dq, atol=1e-6 * u.Hz))
 
     def test_current_matches_p3q_formula(self) -> None:
         ch = self._make(size=1)
@@ -171,13 +177,9 @@ class _HHNaMixin:
         ch.reset_state(V, na)
 
         current = ch.current(V, na)
-        expected = ch.g_max * ch.p.value ** 3 * ch.q.value * (na.E - V)
-        unit = u.mS / u.cm ** 2 * u.mV
-        self.assertTrue(
-            u.math.allclose(
-                current.to_decimal(unit), expected.to_decimal(unit), atol=1e-6
-            )
-        )
+        expected = ch.g_max * ch.p.value**3 * ch.q.value * (na.E - V)
+        unit = u.mS / u.cm**2 * u.mV
+        self.assertTrue(u.math.allclose(current.to_decimal(unit), expected.to_decimal(unit), atol=1e-6))
 
     def test_current_is_zero_when_gates_closed(self) -> None:
         ch = self._make(size=1)
@@ -190,7 +192,7 @@ class _HHNaMixin:
         current = ch.current(V, na)
         self.assertTrue(
             u.math.allclose(
-                current.to_decimal(u.mS / u.cm ** 2 * u.mV),
+                current.to_decimal(u.mS / u.cm**2 * u.mV),
                 jnp.zeros(1),
                 atol=1e-9,
             )
@@ -203,12 +205,11 @@ class Na_Ba2002Test(_HHNaMixin, unittest.TestCase):
     def test_V_sh_shifts_rate_functions(self) -> None:
         ch_a = Na_Ba2002(size=1, V_sh=-50.0 * u.mV)
         ch_b = Na_Ba2002(size=1, V_sh=-60.0 * u.mV)
+        na = _na_info()
 
         V = _V([-55.0])
         V_shifted = _V([-45.0])
-        self.assertTrue(
-            u.math.allclose(ch_a.f_p_alpha(V_shifted), ch_b.f_p_alpha(V), atol=1e-6)
-        )
+        self.assertTrue(u.math.allclose(ch_a.f_p_alpha(V_shifted, na), ch_b.f_p_alpha(V, na), atol=1e-6))
 
 
 class Na_TM1991Test(_HHNaMixin, unittest.TestCase):
@@ -240,7 +241,7 @@ class NaFSU15DCNTest(unittest.TestCase):
         ch.m.value = jnp.array([0.5])
         ch.h.value = jnp.array([0.25])
         i = ch.current(V, na)
-        expected = ch.g_max * (ch.m.value ** 3) * ch.h.value * (na.E - V)
+        expected = ch.g_max * (ch.m.value**3) * ch.h.value * (na.E - V)
         self.assertTrue(
             u.math.allclose(
                 i.to_decimal(_DENSITY_UNIT),
@@ -281,7 +282,7 @@ class NaPSU15DCNTest(unittest.TestCase):
         ch.m.value = jnp.array([0.5])
         ch.h.value = jnp.array([0.25])
         i = ch.current(V, na)
-        expected = ch.g_max * (ch.m.value ** 3) * ch.h.value * (na.E - V)
+        expected = ch.g_max * (ch.m.value**3) * ch.h.value * (na.E - V)
         self.assertTrue(
             u.math.allclose(
                 i.to_decimal(_DENSITY_UNIT),
@@ -321,7 +322,7 @@ class NaZH19IOTest(unittest.TestCase):
         ch.m.value = jnp.array([0.5])
         ch.h.value = jnp.array([0.25])
         i = ch.current(V, na)
-        expected = ch.g_max * (ch.m.value ** 3) * ch.h.value * (na.E - V)
+        expected = ch.g_max * (ch.m.value**3) * ch.h.value * (na.E - V)
         self.assertTrue(
             u.math.allclose(
                 i.to_decimal(_DENSITY_UNIT),
@@ -357,25 +358,19 @@ def _seed_states(channel) -> None:
 
 def _manual_markov_derivatives(channel, V, *ions):
     states = channel.state_values()
-    derivatives = {
-        name: u.math.zeros_like(value)
-        for name, value in states.items()
-    }
+    derivatives = {name: u.math.zeros_like(value) for name, value in states.items()}
 
     for src, dst, f_rate, b_rate in channel.state_pairs:
-        forward = getattr(channel, f_rate)(V, *ions)
+        forward = channel._call_rate(f_rate, V, *ions)
         derivatives[src] = derivatives[src] - states[src] * forward
         derivatives[dst] = derivatives[dst] + states[src] * forward
 
         if b_rate is not None:
-            backward = getattr(channel, b_rate)(V, *ions)
+            backward = channel._call_rate(b_rate, V, *ions)
             derivatives[src] = derivatives[src] + states[dst] * backward
             derivatives[dst] = derivatives[dst] - states[dst] * backward
 
-    return {
-        name: derivative / u.ms
-        for name, derivative in derivatives.items()
-    }
+    return {name: derivative / u.ms for name, derivative in derivatives.items()}
 
 
 class _Nav1p6Mixin:
@@ -389,11 +384,11 @@ class _Nav1p6Mixin:
 
     def test_default_gmax_matches_mod_default(self) -> None:
         ch = self._make(size=1)
-        expected = 16.0 * (u.mS / u.cm ** 2)
+        expected = 16.0 * (u.mS / u.cm**2)
         self.assertTrue(
             u.math.allclose(
-                ch.g_max.to_decimal(u.mS / u.cm ** 2),
-                expected.to_decimal(u.mS / u.cm ** 2),
+                ch.g_max.to_decimal(u.mS / u.cm**2),
+                expected.to_decimal(u.mS / u.cm**2),
                 atol=1e-12,
             )
         )
@@ -514,10 +509,7 @@ class _Nav1p6Mixin:
 
         proto.init_state(V, na)
         _seed_states(proto)
-        before = {
-            name: getattr(proto, name).value
-            for name in proto.state_names
-        }
+        before = {name: getattr(proto, name).value for name in proto.state_names}
 
         with brainstate.environ.context(dt=0.02 * u.ms):
             proto.make_integration(V, na)
@@ -529,6 +521,7 @@ class _Nav1p6Mixin:
             if not bool(u.math.allclose(value, before[name], atol=1e-9)):
                 changed = True
         self.assertTrue(changed)
+
 
 class Nav1p6MA20GoCTest(_Nav1p6Mixin, unittest.TestCase):
     CLS = Nav1p6_MA2020_GoC
@@ -720,11 +713,11 @@ class _Nav1p1Mixin:
 
     def test_default_gmax_matches_mod_default(self) -> None:
         ch = self._make(size=1)
-        expected = 8.0 * (u.mS / u.cm ** 2)
+        expected = 8.0 * (u.mS / u.cm**2)
         self.assertTrue(
             u.math.allclose(
-                ch.g_max.to_decimal(u.mS / u.cm ** 2),
-                expected.to_decimal(u.mS / u.cm ** 2),
+                ch.g_max.to_decimal(u.mS / u.cm**2),
+                expected.to_decimal(u.mS / u.cm**2),
                 atol=1e-12,
             )
         )
@@ -865,10 +858,7 @@ class _Nav1p1Mixin:
 
         proto.init_state(V, na)
         _seed_states(proto)
-        before = {
-            name: getattr(proto, name).value
-            for name in proto.state_names
-        }
+        before = {name: getattr(proto, name).value for name in proto.state_names}
 
         with brainstate.environ.context(dt=0.02 * u.ms):
             proto.make_integration(V, na)
@@ -983,11 +973,11 @@ class NavMA20GrCTest(unittest.TestCase):
     def test_root_type_and_defaults(self) -> None:
         ch = Nav_MA2020_GrC(size=1)
         self.assertIs(Nav_MA2020_GrC.root_type, Sodium)
-        expected = 13.0 * (u.mS / u.cm ** 2)
+        expected = 13.0 * (u.mS / u.cm**2)
         self.assertTrue(
             u.math.allclose(
-                ch.g_max.to_decimal(u.mS / u.cm ** 2),
-                expected.to_decimal(u.mS / u.cm ** 2),
+                ch.g_max.to_decimal(u.mS / u.cm**2),
+                expected.to_decimal(u.mS / u.cm**2),
                 atol=1e-12,
             )
         )
@@ -1040,8 +1030,18 @@ class NavMA20GrCTest(unittest.TestCase):
         na = _na_info()
         ch.init_state(V, na)
         values = {
-            "C1": 0.12, "C2": 0.08, "C3": 0.07, "C4": 0.05, "C5": 0.04,
-            "O": 0.1, "OB": 0.09, "I1": 0.06, "I2": 0.05, "I3": 0.04, "I4": 0.03, "I5": 0.02,
+            "C1": 0.12,
+            "C2": 0.08,
+            "C3": 0.07,
+            "C4": 0.05,
+            "C5": 0.04,
+            "O": 0.1,
+            "OB": 0.09,
+            "I1": 0.06,
+            "I2": 0.05,
+            "I3": 0.04,
+            "I4": 0.03,
+            "I5": 0.02,
         }
         for name, value in values.items():
             getattr(ch, name).value = jnp.array([value])
@@ -1066,31 +1066,42 @@ class NavMA20GrCTest(unittest.TestCase):
         na = _na_info(2)
         ch.init_state(V, na)
         ch.reset_steady_state(V, na)
-        states = ch.state_values()
-        total = None
-        for name in ch.state_names + (ch.redundant_state,):
-            total = states[name] if total is None else (total + states[name])
-        self.assertTrue(u.math.allclose(total, jnp.ones(2), atol=1e-6))
-        ch.compute_derivative(V, na)
-        for name in ch.state_names:
-            self.assertTrue(
-                u.math.allclose(
-                    getattr(ch, name).derivative,
-                    jnp.zeros(2) / u.ms,
-                    atol=1e-5 * u.Hz,
-                )
-            )
+        _assert_markov_probability_total(self, ch, 2)
+        _assert_markov_stationary(self, ch, V, na, 2)
+
+    def test_init_state_uses_steady_state_initialization(self) -> None:
+        ch = Nav_MA2020_GrC(size=2)
+        V = _V([-60.0, -50.0])
+        na = _na_info(2)
+        ch.init_state(V, na)
+        _assert_markov_probability_total(self, ch, 2)
+        _assert_markov_stationary(self, ch, V, na, 2)
+
+    def test_reset_state_uses_steady_state_initialization(self) -> None:
+        reset = Nav_MA2020_GrC(size=2)
+        steady = Nav_MA2020_GrC(size=2)
+        V = _V([-60.0, -50.0])
+        na = _na_info(2)
+        reset.init_state(V, na)
+        steady.init_state(V, na)
+        reset.reset_state(V, na)
+        steady.reset_steady_state(V, na)
+        reset_states = reset.state_values()
+        steady_states = steady.state_values()
+        for name in reset.state_names + (reset.redundant_state,):
+            self.assertTrue(u.math.allclose(reset_states[name], steady_states[name], atol=1e-6))
+        _assert_markov_stationary(self, reset, V, na, 2)
 
 
 class NaFHFMA20GrCTest(unittest.TestCase):
     def test_root_type_and_defaults(self) -> None:
         ch = NaFHF_MA2020_GrC(size=1)
         self.assertIs(NaFHF_MA2020_GrC.root_type, Sodium)
-        expected = 13.0 * (u.mS / u.cm ** 2)
+        expected = 13.0 * (u.mS / u.cm**2)
         self.assertTrue(
             u.math.allclose(
-                ch.g_max.to_decimal(u.mS / u.cm ** 2),
-                expected.to_decimal(u.mS / u.cm ** 2),
+                ch.g_max.to_decimal(u.mS / u.cm**2),
+                expected.to_decimal(u.mS / u.cm**2),
                 atol=1e-12,
             )
         )
@@ -1116,8 +1127,8 @@ class NaFHFMA20GrCTest(unittest.TestCase):
         alfa = factor * ch.Aalfa * u.math.exp((V / u.mV) / ch.Valfa)
         self.assertTrue(u.math.allclose(ch.f33(V), ch.n3 * alfa * ch.c, atol=1e-6))
         self.assertTrue(u.math.allclose(ch.b33(V), ch.n2 * alfa * ch.d, atol=1e-6))
-        self.assertTrue(u.math.allclose(ch.fl6(V), factor * ch.ALon * ch.c ** 2, atol=1e-6))
-        self.assertTrue(u.math.allclose(ch.bl6(V), factor * ch.ALoff * ch.d ** 2, atol=1e-6))
+        self.assertTrue(u.math.allclose(ch.fl6(V), factor * ch.ALon * ch.c**2, atol=1e-6))
+        self.assertTrue(u.math.allclose(ch.bl6(V), factor * ch.ALoff * ch.d**2, atol=1e-6))
 
     def test_current_uses_open_state_only(self) -> None:
         ch = NaFHF_MA2020_GrC(size=1)
@@ -1143,9 +1154,22 @@ class NaFHFMA20GrCTest(unittest.TestCase):
         na = _na_info()
         ch.init_state(V, na)
         values = {
-            "C1": 0.08, "C2": 0.06, "C3": 0.07, "C4": 0.05, "C5": 0.04,
-            "O": 0.08, "OB": 0.07, "I1": 0.05, "I2": 0.04, "I3": 0.04, "I4": 0.03, "I5": 0.02,
-            "L3": 0.06, "L4": 0.05, "L5": 0.04, "L6": 0.03,
+            "C1": 0.08,
+            "C2": 0.06,
+            "C3": 0.07,
+            "C4": 0.05,
+            "C5": 0.04,
+            "O": 0.08,
+            "OB": 0.07,
+            "I1": 0.05,
+            "I2": 0.04,
+            "I3": 0.04,
+            "I4": 0.03,
+            "I5": 0.02,
+            "L3": 0.06,
+            "L4": 0.05,
+            "L5": 0.04,
+            "L6": 0.03,
         }
         for name, value in values.items():
             getattr(ch, name).value = jnp.array([value])
@@ -1153,16 +1177,10 @@ class NaFHFMA20GrCTest(unittest.TestCase):
         ch.compute_derivative(V, na)
 
         expected_dL3 = (
-            states["C3"] * ch.fl3(V)
-            + states["L4"] * ch.b33(V)
-            - states["L3"] * ch.bl3(V)
-            - states["L3"] * ch.f33(V)
+            states["C3"] * ch.fl3(V) + states["L4"] * ch.b33(V) - states["L3"] * ch.bl3(V) - states["L3"] * ch.f33(V)
         ) / u.ms
         expected_dL6 = (
-            states["L5"] * ch.f3n(V)
-            + states["O"] * ch.fl6(V)
-            - states["L6"] * ch.b3n(V)
-            - states["L6"] * ch.bl6(V)
+            states["L5"] * ch.f3n(V) + states["O"] * ch.fl6(V) - states["L6"] * ch.b3n(V) - states["L6"] * ch.bl6(V)
         ) / u.ms
         self.assertTrue(u.math.allclose(ch.L3.derivative, expected_dL3, atol=1e-6 * u.Hz))
         self.assertTrue(u.math.allclose(ch.L6.derivative, expected_dL6, atol=1e-6 * u.Hz))
@@ -1173,20 +1191,31 @@ class NaFHFMA20GrCTest(unittest.TestCase):
         na = _na_info(2)
         ch.init_state(V, na)
         ch.reset_steady_state(V, na)
-        states = ch.state_values()
-        total = None
-        for name in ch.state_names + (ch.redundant_state,):
-            total = states[name] if total is None else (total + states[name])
-        self.assertTrue(u.math.allclose(total, jnp.ones(2), atol=1e-6))
-        ch.compute_derivative(V, na)
-        for name in ch.state_names:
-            self.assertTrue(
-                u.math.allclose(
-                    getattr(ch, name).derivative,
-                    jnp.zeros(2) / u.ms,
-                    atol=1e-5 * u.Hz,
-                )
-            )
+        _assert_markov_probability_total(self, ch, 2)
+        _assert_markov_stationary(self, ch, V, na, 2)
+
+    def test_init_state_uses_steady_state_initialization(self) -> None:
+        ch = NaFHF_MA2020_GrC(size=2)
+        V = _V([-60.0, -50.0])
+        na = _na_info(2)
+        ch.init_state(V, na)
+        _assert_markov_probability_total(self, ch, 2)
+        _assert_markov_stationary(self, ch, V, na, 2)
+
+    def test_reset_state_uses_steady_state_initialization(self) -> None:
+        reset = NaFHF_MA2020_GrC(size=2)
+        steady = NaFHF_MA2020_GrC(size=2)
+        V = _V([-60.0, -50.0])
+        na = _na_info(2)
+        reset.init_state(V, na)
+        steady.init_state(V, na)
+        reset.reset_state(V, na)
+        steady.reset_steady_state(V, na)
+        reset_states = reset.state_values()
+        steady_states = steady.state_values()
+        for name in reset.state_names + (reset.redundant_state,):
+            self.assertTrue(u.math.allclose(reset_states[name], steady_states[name], atol=1e-6))
+        _assert_markov_stationary(self, reset, V, na, 2)
 
 
 if __name__ == "__main__":

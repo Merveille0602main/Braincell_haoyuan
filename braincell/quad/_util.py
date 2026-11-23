@@ -21,7 +21,7 @@ import brainunit as u
 import jax
 import jax.numpy as jnp
 
-from braincell._typing import T, DT, Y0, Y1, Aux, Jacobian, VectorFiled, Args
+from braincell._typing import T, DT, Y0, Y1, Aux, Jacobian, VectorField, Args
 from .protocol import DiffEqState, DiffEqModule, IndependentIntegration
 
 
@@ -29,14 +29,23 @@ def _array_dtype(value) -> jnp.dtype:
     return jnp.asarray(u.get_magnitude(value)).dtype
 
 
-def _filter_diffeq(independent_modules, path, value):
-    for module_path in independent_modules.keys():
-        if path[:len(module_path)] == module_path:
-            return False
+def _has_path_prefix(path, prefixes):
+    for prefix in prefixes:
+        if path[: len(prefix)] == prefix:
+            return True
+    return False
+
+
+def _filter_diffeq(independent_modules, excluded_paths, path, value):
+    direct_owner_path = path[:-1]
+    if direct_owner_path in independent_modules:
+        return False
+    if _has_path_prefix(path, excluded_paths):
+        return False
     return isinstance(value, DiffEqState)
 
 
-def split_diffeq_states(module: DiffEqModule):
+def split_diffeq_states(module: DiffEqModule, *, excluded_paths=()):
     """
     Splits the states of a differential equation module into three categories:
     all states, states to be integrated (diffeq_states), and other states.
@@ -69,8 +78,11 @@ def split_diffeq_states(module: DiffEqModule):
 
     Notes
     -----
-    - States belonging to submodules of type :class:`IndependentIntegration` are excluded
-      from `diffeq_states` to allow for independent integration strategies.
+    - States directly owned by submodules of type
+      :class:`IndependentIntegration` are excluded from `diffeq_states` to
+      allow for independent integration strategies. Child modules remain
+      eligible unless they are independently integrated themselves or matched
+      by ``excluded_paths``.
     - The function relies on the module's state graph and a custom filter to
       distinguish between state types.
 
@@ -78,10 +90,13 @@ def split_diffeq_states(module: DiffEqModule):
     --------
     >>> all_states, diffeq_states, other_states = split_diffeq_states(my_module)
     """
-    # exclude IndependentIntegration module
+    # Exclude states directly owned by IndependentIntegration modules.
     independent_modules = brainstate.graph.nodes(module, IndependentIntegration, allowed_hierarchy=(1, 1000000000000))
     all_states = brainstate.graph.states(module)
-    diffeq_states, other_states = all_states.split(functools.partial(_filter_diffeq, independent_modules), ...)
+    excluded_paths = tuple(tuple(path) for path in excluded_paths)
+    diffeq_states, other_states = all_states.split(
+        functools.partial(_filter_diffeq, independent_modules, excluded_paths), ...
+    )
     return all_states, diffeq_states, other_states
 
 
@@ -138,7 +153,7 @@ def _assign_arr_to_states(
             vals_like_leaves.append(vals[..., index])
             index += 1
         elif method == 'concat':
-            vals_like_leaves.append(vals[..., index: index + leaf.shape[-1]])
+            vals_like_leaves.append(vals[..., index : index + leaf.shape[-1]])
             index += leaf.shape[-1]
         else:
             raise ValueError(f'Unknown method: {method}')
@@ -150,10 +165,11 @@ def _assign_arr_to_states(
 def _transform_diffeq_module_into_dimensionless_fn(
     target: DiffEqModule,
     dt: DT,
-    method: str = 'concat'
+    method: str = 'concat',
+    excluded_paths=(),
 ):
     assert method in ['concat', 'stack'], f'Unknown method: {method}'
-    all_states, diffeq_states, other_states = split_diffeq_states(target)
+    all_states, diffeq_states, other_states = split_diffeq_states(target, excluded_paths=excluded_paths)
     all_state_ids = {id(st) for st in all_states.values()}
 
     def vector_field(t, y_dimensionless, *args):
@@ -178,15 +194,13 @@ def _transform_diffeq_module_into_dimensionless_fn(
 
 
 def apply_standard_solver_step(
-    solver_step: Callable[
-        [VectorFiled, Y0, T, DT, Args],
-        Tuple[Y1, Aux]
-    ],
+    solver_step: Callable[[VectorField, Y0, T, DT, Args], Tuple[Y1, Aux]],
     target: DiffEqModule,
     t: T,
     dt: DT,
     *args,
     merging: str = 'concat',
+    excluded_paths=(),
 ):
     """
     Apply a standard solver step to the given differential equation module.
@@ -229,8 +243,11 @@ def apply_standard_solver_step(
 
     # pre integral
     target.pre_integral(*args)
-    dimensionless_fn, diffeq_states, other_states = (
-        _transform_diffeq_module_into_dimensionless_fn(target, dt=dt, method=merging)
+    dimensionless_fn, diffeq_states, other_states = _transform_diffeq_module_into_dimensionless_fn(
+        target,
+        dt=dt,
+        method=merging,
+        excluded_paths=excluded_paths,
     )
 
     # one-step integration

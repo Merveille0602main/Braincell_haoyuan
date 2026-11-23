@@ -17,14 +17,16 @@ import unittest
 
 import brainstate
 import brainunit as u
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from braincell import Channel, HHTypedNeuron, IonChannel, IonInfo, MixIons
 from braincell.ion import CalciumFixed, PotassiumFixed, SodiumFixed
 
 
 class _RecordingKCaChannel(Channel):
-    """Records every call to ``update`` so the test can assert dispatch."""
+    """Records every call to ``ind_update`` so the test can assert dispatch."""
 
     root_type = brainstate.mixin.JointTypes[PotassiumFixed, CalciumFixed]
 
@@ -32,7 +34,7 @@ class _RecordingKCaChannel(Channel):
         super().__init__(size=size, name=name)
         self.calls = []
 
-    def update(self, V, K: IonInfo, Ca: IonInfo):
+    def ind_update(self, V, K: IonInfo, Ca: IonInfo):
         self.calls.append((V, K, Ca))
 
     def init_state(self, V, K, Ca, batch_size=None):  # pragma: no cover
@@ -45,13 +47,13 @@ class _RecordingKCaChannel(Channel):
         pass
 
     def current(self, V, K, Ca):  # pragma: no cover
-        return 0.0 * u.nA / u.cm ** 2
+        return 0.0 * u.nA / u.cm**2
 
 
-class MixIonsUpdateReceiverTest(unittest.TestCase):
-    """Regression for CRIT-01: MixIons.update iterated the wrong graph."""
+class MixIonsIndependentUpdateReceiverTest(unittest.TestCase):
+    """Regression for CRIT-01: MixIons.ind_update iterated the wrong graph."""
 
-    def test_update_reaches_child_channel(self) -> None:
+    def test_ind_update_reaches_child_channel(self) -> None:
         k = PotassiumFixed(size=1)
         ca = CalciumFixed(size=1)
         mix = MixIons(k, ca)
@@ -59,7 +61,7 @@ class MixIonsUpdateReceiverTest(unittest.TestCase):
         mix.add(kca=rec)
 
         V = jnp.zeros((1,)) * u.mV
-        mix.update(V)
+        mix.ind_update(V)
 
         self.assertEqual(len(rec.calls), 1, "child channel must see exactly one update")
         seen_V, seen_K, seen_Ca = rec.calls[0]
@@ -73,7 +75,7 @@ class IonCurrentExternalOnlyTest(unittest.TestCase):
     def test_external_only_returns_sum_without_crashing(self) -> None:
         na = SodiumFixed(size=1)
 
-        expected = 1.5 * u.nA / u.cm ** 2
+        expected = 1.5 * u.nA / u.cm**2
         na.register_external_current(
             "probe",
             lambda V, ion_info: u.math.broadcast_to(expected, V.shape),
@@ -84,8 +86,8 @@ class IonCurrentExternalOnlyTest(unittest.TestCase):
 
         self.assertTrue(
             u.math.allclose(
-                out.to_decimal(u.nA / u.cm ** 2),
-                expected.to_decimal(u.nA / u.cm ** 2),
+                out.to_decimal(u.nA / u.cm**2),
+                expected.to_decimal(u.nA / u.cm**2),
                 atol=1e-9,
             )
         )
@@ -94,7 +96,7 @@ class IonCurrentExternalOnlyTest(unittest.TestCase):
         na = SodiumFixed(size=1)
         na.register_external_current(
             "probe",
-            lambda V, ion_info: 1.0 * u.nA / u.cm ** 2,
+            lambda V, ion_info: 1.0 * u.nA / u.cm**2,
         )
         V = jnp.zeros((1,)) * u.mV
         self.assertIsNone(na.current(V, include_external=False))
@@ -129,6 +131,7 @@ class MixIonsFactoryArityTest(unittest.TestCase):
 
     def test_single_ion_raises_with_mix_ions_message(self) -> None:
         from braincell import mix_ions
+
         with self.assertRaises(AssertionError) as ctx:
             mix_ions(SodiumFixed(size=1))
         self.assertIn("mix_ions", str(ctx.exception))
@@ -139,11 +142,13 @@ class HHTypedNeuronGetSpikeTest(unittest.TestCase):
 
     def test_get_spike_is_method_on_base(self) -> None:
         from braincell._base import HHTypedNeuron
+
         self.assertTrue(hasattr(HHTypedNeuron, "get_spike"))
         self.assertTrue(callable(HHTypedNeuron.get_spike))
 
     def test_cast_like_is_importable_from_base(self) -> None:
         from braincell._base import _cast_like
+
         self.assertTrue(callable(_cast_like))
 
     def test_single_compartment_inherits_get_spike(self) -> None:
@@ -159,3 +164,22 @@ class HHTypedNeuronGetSpikeTest(unittest.TestCase):
         sc = SingleCompartment(size=1, V_th=0.0 * u.mV)
         spk = sc.get_spike(jnp.array([-10.0]) * u.mV, jnp.array([10.0]) * u.mV)
         self.assertGreater(float(spk[0]), 0.0)
+
+    def test_default_crossing_surrogate_gradient_and_finite_support(self) -> None:
+        from braincell._single_compartment.base import SingleCompartment
+
+        sc = SingleCompartment(size=1, V_th=0.0 * u.mV)
+
+        def crossing(last_v_mantissa, next_v_mantissa):
+            last_v = jnp.asarray([last_v_mantissa]) * u.mV
+            next_v = jnp.asarray([next_v_mantissa]) * u.mV
+            return sc.get_spike(last_v, next_v)[0]
+
+        self.assertEqual(float(crossing(-10.0, 10.0)), 1.0)
+        grad_last, grad_next = jax.grad(crossing, argnums=(0, 1))(-10.0, 10.0)
+        np.testing.assert_allclose(grad_last, -0.0075, rtol=1e-6, atol=1e-8)
+        np.testing.assert_allclose(grad_next, 0.0075, rtol=1e-6, atol=1e-8)
+
+        far_grad_last, far_grad_next = jax.grad(crossing, argnums=(0, 1))(-40.0, 40.0)
+        np.testing.assert_allclose(far_grad_last, 0.0, atol=0.0)
+        np.testing.assert_allclose(far_grad_next, 0.0, atol=0.0)

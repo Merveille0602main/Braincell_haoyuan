@@ -20,10 +20,12 @@ import unittest
 import brainunit as u
 import numpy as np
 
-from braincell import Branch
+from braincell import Branch, Cell, Morphology
+from braincell.filter import AllRegion
+from braincell.vis import plot2d, plot3d
 from braincell import vis as morpho_vis
 from braincell.vis.backend import BackendChooser
-from braincell.vis._test_helper import FakeBackend
+from braincell.vis._testing import FakeBackend
 
 import jax.numpy as jnp
 
@@ -138,9 +140,7 @@ class BranchTest(unittest.TestCase):
         self.assertTrue(
             u.math.array_equal(
                 branch.points,
-                np.array(
-                    [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 0.0, 0.0), (20.0, 0.0, 0.0)]
-                ) * u.um,
+                np.array([(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 0.0, 0.0), (20.0, 0.0, 0.0)]) * u.um,
             )
         )
 
@@ -152,17 +152,22 @@ class BranchTest(unittest.TestCase):
             type="axon",
         )
 
-        expected_area = math.pi * (2.0 + 1.0) * math.sqrt(10.0 ** 2 + (1.0 - 2.0) ** 2)
-        expected_volume = math.pi * 10.0 * (2.0 ** 2 + 2.0 * 1.0 + 1.0 ** 2) / 3.0
+        expected_area = math.pi * (2.0 + 1.0) * math.sqrt(10.0**2 + (1.0 - 2.0) ** 2)
+        expected_volume = math.pi * 10.0 * (2.0**2 + 2.0 * 1.0 + 1.0**2) / 3.0
 
         self.assertAlmostEqual(branch.length.to_decimal(u.um), 10.0)
         self.assertAlmostEqual(branch.mean_radius.to_decimal(u.um), 1.5)
-        self.assertAlmostEqual(float(branch.areas[0].to_decimal(u.um ** 2)), expected_area, places=5)
-        self.assertAlmostEqual(float(branch.area.to_decimal(u.um ** 2)), expected_area, places=5)
-        self.assertAlmostEqual(float(branch.volumes[0].to_decimal(u.um ** 3)), expected_volume, places=5)
-        self.assertAlmostEqual(float(branch.volume.to_decimal(u.um ** 3)), expected_volume, places=5)
-        self.assertTrue(u.math.allclose(branch.area, u.math.sum(branch.areas)))
-        self.assertTrue(u.math.allclose(branch.volume, u.math.sum(branch.volumes)))
+        self.assertAlmostEqual(float(branch.areas[0].to_decimal(u.um**2)), expected_area, places=5)
+        self.assertAlmostEqual(float(branch.area.to_decimal(u.um**2)), expected_area, places=5)
+        self.assertAlmostEqual(float(branch.volumes[0].to_decimal(u.um**3)), expected_volume, places=5)
+        self.assertAlmostEqual(float(branch.volume.to_decimal(u.um**3)), expected_volume, places=5)
+        # Bypass u.math.sum: saiunit's wrapper forwards promote_integers= to
+        # numpy.sum, which numpy 2.x rejects. Sum on the mantissa and re-attach
+        # the unit instead.
+        areas = branch.areas
+        volumes = branch.volumes
+        self.assertTrue(u.math.allclose(branch.area, np.sum(areas.mantissa) * areas.unit))
+        self.assertTrue(u.math.allclose(branch.volume, np.sum(volumes.mantissa) * volumes.unit))
 
     def test_zero_length_segment_contributes_area_but_not_volume(self) -> None:
         branch = Branch(
@@ -173,8 +178,8 @@ class BranchTest(unittest.TestCase):
         )
 
         self.assertAlmostEqual(branch.length.to_decimal(u.um), 30.0)
-        self.assertAlmostEqual(float(branch.areas[1].to_decimal(u.um ** 2)), math.pi * (2.0 ** 2 - 1.0 ** 2), places=7)
-        self.assertAlmostEqual(float(branch.volumes[1].to_decimal(u.um ** 3)), 0.0, places=9)
+        self.assertAlmostEqual(float(branch.areas[1].to_decimal(u.um**2)), math.pi * (2.0**2 - 1.0**2), places=7)
+        self.assertAlmostEqual(float(branch.volumes[1].to_decimal(u.um**3)), 0.0, places=9)
         self.assertAlmostEqual(branch.mean_radius.to_decimal(u.um), 2.5)
 
     def test_branch_rejects_zero_total_length(self) -> None:
@@ -239,14 +244,26 @@ class BranchTest(unittest.TestCase):
 
     def test_branch_init_rejects_bad_shapes(self) -> None:
         with self.assertRaises(ValueError):
-            Branch(lengths=np.array([[[10.0], [20.0]]]) * u.um, radii_proximal=[2.0, 1.0] * u.um,
-                   radii_distal=[1.0, 0.5] * u.um, type="axon")
+            Branch(
+                lengths=np.array([[[10.0], [20.0]]]) * u.um,
+                radii_proximal=[2.0, 1.0] * u.um,
+                radii_distal=[1.0, 0.5] * u.um,
+                type="axon",
+            )
         with self.assertRaises(ValueError):
-            Branch(lengths=[10.0] * u.um, radii_proximal=np.array([[[2.0], [1.0]]]) * u.um, radii_distal=[1.0] * u.um,
-                   type="axon")
+            Branch(
+                lengths=[10.0] * u.um,
+                radii_proximal=np.array([[[2.0], [1.0]]]) * u.um,
+                radii_distal=[1.0] * u.um,
+                type="axon",
+            )
         with self.assertRaises(ValueError):
-            Branch(lengths=[10.0] * u.um, radii_proximal=[2.0] * u.um, radii_distal=np.array([[[1.0], [0.5]]]) * u.um,
-                   type="axon")
+            Branch(
+                lengths=[10.0] * u.um,
+                radii_proximal=[2.0] * u.um,
+                radii_distal=np.array([[[1.0], [0.5]]]) * u.um,
+                type="axon",
+            )
         with self.assertRaises(ValueError):
             Branch(
                 lengths=[10.0] * u.um,
@@ -555,5 +572,25 @@ class BranchTest(unittest.TestCase):
         )
         backend = FakeBackend()
 
-        with self.assertRaisesRegex(ValueError, r"vis2d\(layout='stem', shape='line'\).+vis2d\(layout='stem', shape='frustum'\)"):
+        with self.assertRaisesRegex(
+            ValueError, r"vis2d\(layout='stem', shape='line'\).+vis2d\(layout='stem', shape='frustum'\)"
+        ):
             branch.vis3d(show=False, chooser=BackendChooser(backends=(backend,)))
+
+
+class BranchViewRejectionTest(unittest.TestCase):
+    """A Branch view is not a Morphology and must be refused downstream."""
+
+    def test_branch_views_are_rejected_by_downstream_entrypoints(self) -> None:
+        soma = Branch.from_lengths(lengths=[20.0] * u.um, radii=[10.0, 10.0] * u.um, type="soma")
+        tree = Morphology.from_root(soma, name="soma")
+        backend = FakeBackend()
+
+        with self.assertRaises(TypeError):
+            plot3d(tree.soma, chooser=BackendChooser(backends=(backend,)))
+        with self.assertRaises(TypeError):
+            plot2d(tree.soma, chooser=BackendChooser(backends=(backend,)))
+        with self.assertRaises(TypeError):
+            Cell(tree.soma)
+        with self.assertRaises(TypeError):
+            AllRegion().evaluate(tree.soma)
